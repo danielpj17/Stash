@@ -124,8 +124,6 @@ export default function ExpensesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
-  const isFullYear = selectedMonth === "full";
-
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -202,18 +200,14 @@ export default function ExpensesPage() {
                 <button
                   type="button"
                   onClick={() => setExpensesTab("expenses")}
-                  className={`text-sm font-medium transition-colors ${
-                    expensesTab === "expenses" ? "text-white" : "text-gray-300 hover:text-white"
-                  }`}
+                  className="text-sm font-semibold text-white transition-colors hover:opacity-90"
                 >
                   Expenses
                 </button>
                 <button
                   type="button"
                   onClick={() => setExpensesTab("total")}
-                  className={`text-sm font-medium transition-colors whitespace-nowrap ${
-                    expensesTab === "total" ? "text-white" : "text-gray-300 hover:text-white"
-                  }`}
+                  className="text-sm font-semibold text-white transition-colors whitespace-nowrap hover:opacity-90"
                 >
                   Total: ${expenseTotal.toLocaleString("en-US", { minimumFractionDigits: 2 })}
                 </button>
@@ -245,8 +239,8 @@ export default function ExpensesPage() {
 
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-medium">Income</h2>
-                <span className="text-sm font-medium text-white whitespace-nowrap">
+                <h2 className="text-white font-semibold">Income</h2>
+                <span className="text-sm font-semibold text-white whitespace-nowrap">
                   Total: ${incomeTotal.toLocaleString("en-US", { minimumFractionDigits: 2 })}
                 </span>
               </div>
@@ -276,7 +270,7 @@ export default function ExpensesPage() {
           <div className="flex flex-col gap-4">
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-                <h2 className="text-white font-medium">
+                <h2 className="text-white font-semibold">
                   Expense Distribution — {selectedLabel}
                 </h2>
               </div>
@@ -345,8 +339,8 @@ export default function ExpensesPage() {
           <div className="flex flex-col gap-4">
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-                <h2 className="text-white font-medium">
-                  {isFullYear ? "Expenses Over Week" : "Expenses Over Month"} — {selectedLabel}
+                <h2 className="text-white font-semibold">
+                  Expenses Over {selectedLabel}
                 </h2>
               </div>
               <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">
@@ -379,8 +373,8 @@ export default function ExpensesPage() {
 
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-                <h2 className="text-white font-medium">
-                  {isFullYear ? "Income Over Week" : "Income Over Month"} — {selectedLabel}
+                <h2 className="text-white font-semibold">
+                  Income Over {selectedLabel}
                 </h2>
               </div>
               <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">

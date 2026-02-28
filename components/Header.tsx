@@ -22,13 +22,6 @@ export default function Header() {
       </div>
       <div className="flex items-center gap-3">
         <MonthDropdown />
-        <a
-          href="tel:+18017215056"
-          className="inline-flex items-center rounded-lg border border-[#59D58E]/40 bg-[#59D58E]/10 px-3 py-1.5 text-sm font-medium text-[#59D58E] hover:bg-[#59D58E]/20 transition-colors"
-          aria-label="Call +1(801)721-5056"
-        >
-          Call
-        </a>
       </div>
     </header>
   );
