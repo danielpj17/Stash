@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { PlusCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
@@ -11,6 +14,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  Sector,
   ResponsiveContainer,
   Tooltip,
   LineChart,
@@ -113,17 +117,33 @@ function toCumulative(points: DailyPoint[]): DailyPoint[] {
   });
 }
 
-const chartMargin = { top: 8, right: 8, bottom: 8, left: 8 };
+const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
+const MOBILE_BREAKPOINT_PX = 768;
+
 export default function ExpensesPage() {
+  const router = useRouter();
   const { selectedMonth, selectedLabel } = useMonth();
   const { refreshKey } = useRefresh();
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
+  const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
+  const [mobileCheckDone, setMobileCheckDone] = useState(false);
+
+  // On phone viewports, default to the new expense page
+  useEffect(() => {
+    const isMobile = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`).matches;
+    if (isMobile) {
+      router.replace("/new-expense");
+      return;
+    }
+    setMobileCheckDone(true);
+  }, [router]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -169,7 +189,7 @@ export default function ExpensesPage() {
     }));
   }, [expenseData, expenseTotal]);
 
-  if (loading) {
+  if (!mobileCheckDone || loading) {
     return (
       <DashboardLayout>
         <div className="flex items-center justify-center min-h-[40vh] text-gray-400">
@@ -182,7 +202,16 @@ export default function ExpensesPage() {
   return (
     <DashboardLayout>
       <div className="space-y-4">
-        <h1 className="text-xl font-semibold text-white">Expenses</h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl font-semibold text-white">Expenses</h1>
+          <Link
+            href="/new-expense"
+            className="p-2 rounded-lg text-gray-400 hover:text-[#59D58E] hover:bg-charcoal transition-colors"
+            aria-label="New expense"
+          >
+            <PlusCircle className="w-6 h-6" />
+          </Link>
+        </div>
         {error && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-2 text-sm">
             {error}
@@ -218,7 +247,7 @@ export default function ExpensesPage() {
                     {expenseData.map((row, index) => (
                       <div
                         key={row.category}
-                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#353535]" : "bg-[#252525]"}`}
+                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                       >
                         <span className="text-gray-300">{row.category}</span>
                         <span className="text-right">
@@ -252,7 +281,7 @@ export default function ExpensesPage() {
                     incomeItems.map((row, index) => (
                       <div
                         key={row.description}
-                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#353535]" : "bg-[#252525]"}`}
+                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                       >
                         <span className="text-gray-300">{row.description}</span>
                         <span className="text-right">
@@ -275,7 +304,7 @@ export default function ExpensesPage() {
                 </h2>
               </div>
               <div className="p-4 flex-1 min-h-0 bg-[#252525]">
-                <div className="h-56 w-full p-2">
+                <div className="h-56 w-full p-2 expense-pie-chart">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart margin={{ top: 8, right: 80, bottom: 8, left: 80 }}>
                       <Pie
@@ -287,9 +316,21 @@ export default function ExpensesPage() {
                         innerRadius={44}
                         outerRadius={66}
                         paddingAngle={2}
+                        activeIndex={activePieIndex ?? undefined}
+                        onMouseEnter={(_data, index) => setActivePieIndex(index)}
+                        onMouseLeave={() => setActivePieIndex(null)}
+                        style={{ outline: "none" }}
+                        activeShape={(props: unknown) => {
+                          const p = props as React.ComponentProps<typeof Sector> & { style?: React.CSSProperties };
+                          return <Sector {...p} stroke="none" style={{ ...p.style, outline: "none" }} />;
+                        }}
+                        inactiveShape={(props: unknown) => {
+                          const p = props as React.ComponentProps<typeof Sector> & { style?: React.CSSProperties };
+                          return <Sector {...p} style={{ ...p.style, opacity: 0.45 }} />;
+                        }}
                       >
                         {pieData.map((_, i) => (
-                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} style={{ outline: "none" }} />
                         ))}
                       </Pie>
                       <Tooltip
@@ -320,9 +361,16 @@ export default function ExpensesPage() {
                     <tbody className="text-white">
                       {expenseDataWithPct
                         .filter((d) => d.total > 0)
-                        .map((row) => (
-                          <tr key={row.category} className="border-b border-charcoal-dark/80 odd:bg-tileRowAlt">
-                            <td className="py-1.5 pr-2 pl-2 text-gray-200">{row.category}</td>
+                        .map((row, index) => (
+                          <tr key={row.category} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
+                            <td className="py-1.5 pr-2 pl-2 text-gray-200">
+                              <span
+                                className="inline-block w-3 h-3 rounded-sm shrink-0 mr-2 align-middle"
+                                style={{ backgroundColor: PIE_COLORS[index % PIE_COLORS.length] }}
+                                aria-hidden
+                              />
+                              {row.category}
+                            </td>
                             <td className="py-1.5 text-right pr-2">
                               {row.pct.toFixed(1)}%
                             </td>
@@ -340,14 +388,14 @@ export default function ExpensesPage() {
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
                 <h2 className="text-white font-semibold">
-                  Expenses Over {selectedLabel}
+                  Expenses: {selectedLabel}
                 </h2>
               </div>
-              <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">
+              <div className="pt-2 pr-4 pb-2 pl-0 flex-1 min-h-[260px] min-w-0 bg-[#252525] flex flex-col">
                 {dailyExpenses.length === 0 ? (
                   <p className="text-gray-400 text-sm flex items-center justify-center h-full">No expense data for this period.</p>
                 ) : (
-                  <div className="h-full p-2">
+                  <div className="flex-1 min-h-0 w-full -ml-2">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={dailyExpenses} margin={chartMargin}>
                         <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
@@ -374,14 +422,14 @@ export default function ExpensesPage() {
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
                 <h2 className="text-white font-semibold">
-                  Income Over {selectedLabel}
+                  Income: {selectedLabel}
                 </h2>
               </div>
-              <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">
+              <div className="pt-2 pr-4 pb-2 pl-0 flex-1 min-h-[260px] min-w-0 bg-[#252525] flex flex-col">
                 {dailyIncome.length === 0 ? (
                   <p className="text-gray-400 text-sm flex items-center justify-center h-full">No income data for this period.</p>
                 ) : (
-                  <div className="h-full p-2">
+                  <div className="flex-1 min-h-0 w-full -ml-2">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={dailyIncome} margin={chartMargin}>
                         <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />

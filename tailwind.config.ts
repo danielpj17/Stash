@@ -14,7 +14,7 @@ const config: Config = {
           light: "#282828",
           dark: "#333333",
         },
-        tileRowAlt: "#222425",
+        tileRowAlt: "#2C2C2C",
         accent: {
           DEFAULT: "#59D58E",
           light: "#6EE0A0",

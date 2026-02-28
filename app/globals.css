@@ -15,6 +15,11 @@ body {
   @apply bg-charcoal text-gray-100 antialiased;
 }
 
+/* Remove focus/selection outline on pie chart tap (Recharts internal focus ring) */
+.expense-pie-chart *:focus {
+  outline: none;
+}
+
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
