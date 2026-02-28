@@ -44,10 +44,6 @@ function monthNameFromNumber(month: number): string {
   ][month - 1] ?? "";
 }
 
-function monthFromCurrentTimestamp(): string {
-  return String(new Date().getMonth() + 1);
-}
-
 function rowMatchesMonth(row: SheetRow, selectedMonth?: string): boolean {
   if (!selectedMonth || selectedMonth === "full") return true;
   const monthNum = Number(selectedMonth);
@@ -108,12 +104,10 @@ export async function submitExpense(payload: {
   description: string;
   month?: string;
 }): Promise<void> {
-  const month = payload.month?.trim() || monthFromCurrentTimestamp();
-
   const res = await fetch(SHEETS_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, month }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
