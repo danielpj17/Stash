@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --charcoal: #161616;
+  --charcoal-light: #282828;
+  --charcoal-dark: #333333;
+  --accent: #59D58E;
+  --accent-light: #6EE0A0;
+  --accent-dark: #3BC77A;
+}
+
+body {
+  @apply bg-charcoal text-gray-100 antialiased;
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--charcoal-light) var(--charcoal);
+  }
+}
