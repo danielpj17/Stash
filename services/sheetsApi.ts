@@ -88,9 +88,11 @@ export async function getExpenses(month?: string): Promise<SheetRow[]> {
     throw new Error(err.error || `Failed to fetch expenses: ${res.status}`);
   }
   const data = await res.json();
-  const rows = Array.isArray(data) ? data : data.rows ?? data.data ?? [];
-  const normalized = rows.map((r: Record<string, unknown>) => normalizeRow(r));
-  return normalized.filter((row) => rowMatchesMonth(row, month));
+  const rows: Record<string, unknown>[] = Array.isArray(data)
+    ? (data as Record<string, unknown>[])
+    : ((data.rows ?? data.data ?? []) as Record<string, unknown>[]);
+  const normalized: SheetRow[] = rows.map((r) => normalizeRow(r));
+  return normalized.filter((row: SheetRow) => rowMatchesMonth(row, month));
 }
 
 /**
