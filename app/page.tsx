@@ -47,6 +47,25 @@ function buildIncomeLineItems(rows: SheetRow[]): { description: string; amount: 
 
 type DailyPoint = { label: string; amount: number };
 
+function getWeekStartDate(date: Date): Date {
+  const start = new Date(date);
+  const day = start.getDay();
+  start.setDate(start.getDate() - day);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function formatWeekLabel(weekStart: Date): string {
+  return `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
+function formatLocalDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function buildDailyExpenses(rows: SheetRow[], selectedMonth: string): DailyPoint[] {
   const expenses = rows.filter((r) => r.expenseType !== "Income");
   if (expenses.length === 0) return [];
@@ -55,11 +74,15 @@ function buildDailyExpenses(rows: SheetRow[], selectedMonth: string): DailyPoint
   expenses.forEach((r) => {
     if (!r.timestamp) return;
     const d = new Date(r.timestamp);
-    const key = isFull ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` : String(d.getDate());
+    if (Number.isNaN(d.getTime())) return;
+    const key = isFull ? formatLocalDateKey(getWeekStartDate(d)) : String(d.getDate());
     byKey[key] = (byKey[key] ?? 0) + r.amount;
   });
   const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([label, amount]) => ({ label, amount }));
+  return entries.map(([key, amount]) => ({
+    label: isFull ? formatWeekLabel(new Date(`${key}T00:00:00`)) : key,
+    amount,
+  }));
 }
 
 function buildDailyIncome(rows: SheetRow[], selectedMonth: string): DailyPoint[] {
@@ -70,11 +93,15 @@ function buildDailyIncome(rows: SheetRow[], selectedMonth: string): DailyPoint[]
   income.forEach((r) => {
     if (!r.timestamp) return;
     const d = new Date(r.timestamp);
-    const key = isFull ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` : String(d.getDate());
+    if (Number.isNaN(d.getTime())) return;
+    const key = isFull ? formatLocalDateKey(getWeekStartDate(d)) : String(d.getDate());
     byKey[key] = (byKey[key] ?? 0) + r.amount;
   });
   const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([label, amount]) => ({ label, amount }));
+  return entries.map(([key, amount]) => ({
+    label: isFull ? formatWeekLabel(new Date(`${key}T00:00:00`)) : key,
+    amount,
+  }));
 }
 
 /** Turn per-period amounts into cumulative running total (step-up chart). */
@@ -97,6 +124,7 @@ export default function ExpensesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
+  const isFullYear = selectedMonth === "full";
 
   useEffect(() => {
     let cancelled = false;
@@ -318,7 +346,7 @@ export default function ExpensesPage() {
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
                 <h2 className="text-white font-medium">
-                  Expenses Over Month — {selectedLabel}
+                  {isFullYear ? "Expenses Over Week" : "Expenses Over Month"} — {selectedLabel}
                 </h2>
               </div>
               <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">
@@ -352,7 +380,7 @@ export default function ExpensesPage() {
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
                 <h2 className="text-white font-medium">
-                  Income Over Month — {selectedLabel}
+                  {isFullYear ? "Income Over Week" : "Income Over Month"} — {selectedLabel}
                 </h2>
               </div>
               <div className="p-4 flex-1 min-h-[240px] bg-[#252525]">

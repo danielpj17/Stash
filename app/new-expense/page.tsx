@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
-import { useMonth, MONTH_OPTIONS } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { submitExpense } from "@/services/sheetsApi";
 import { EXPENSE_TYPE_OPTIONS } from "@/lib/constants";
@@ -10,12 +9,10 @@ import { Loader2 } from "lucide-react";
 import Link from "next/link";
 
 export default function NewExpensePage() {
-  const { selectedMonth, selectedLabel } = useMonth();
   const { triggerRefresh } = useRefresh();
   const [expenseType, setExpenseType] = useState("");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
-  const [month, setMonth] = useState(selectedMonth);
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -34,14 +31,12 @@ export default function NewExpensePage() {
         expenseType,
         amount: num,
         description: description.trim(),
-        month,
       });
       triggerRefresh();
       setStatus("success");
       setAmount("");
       setDescription("");
       setExpenseType("");
-      setMonth(selectedMonth);
     } catch (err) {
       setStatus("error");
       setErrorMessage(err instanceof Error ? err.message : "Failed to submit.");
@@ -107,24 +102,6 @@ export default function NewExpensePage() {
                 placeholder="Optional notes"
                 className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none"
               />
-            </div>
-
-            <div>
-              <label htmlFor="month" className="block text-sm font-medium text-gray-300 mb-1">
-                Month
-              </label>
-              <select
-                id="month"
-                value={month}
-                onChange={(e) => setMonth(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-              >
-                {MONTH_OPTIONS.filter((o) => o.value !== "full").map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
             </div>
 
             {status === "error" && (
