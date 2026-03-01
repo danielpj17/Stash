@@ -21,15 +21,12 @@ export default function ContactPage() {
             Get in touch about Stash or report an issue.
           </p>
           <a
-            href="mailto:support@example.com"
+            href="mailto:danieljohnson6@gmail.com"
             className="inline-flex items-center gap-2 text-accent hover:text-accent-light transition-colors"
           >
             <Mail className="w-4 h-4" />
             support@example.com
           </a>
-          <p className="text-gray-500 text-xs mt-4">
-            Replace this email in <code className="text-gray-400">app/contact/page.tsx</code> with your preferred address.
-          </p>
         </div>
       </div>
     </DashboardLayout>
