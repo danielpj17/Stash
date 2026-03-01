@@ -17,9 +17,13 @@ type MonthContextType = {
 
 const MonthContext = createContext<MonthContextType | null>(null);
 
+function getCurrentMonthValue(): string {
+  return String(new Date().getMonth() + 1);
+}
+
 export function MonthProvider({ children }: { children: ReactNode }) {
-  const [selectedMonth, setSelectedMonth] = useState("2");
-  const selectedLabel = MONTH_OPTIONS.find((o) => o.value === selectedMonth)?.label ?? "February 2026";
+  const [selectedMonth, setSelectedMonth] = useState(getCurrentMonthValue);
+  const selectedLabel = MONTH_OPTIONS.find((o) => o.value === selectedMonth)?.label ?? "Full Year 2026";
 
   return (
     <MonthContext.Provider value={{ selectedMonth, setSelectedMonth, selectedLabel }}>

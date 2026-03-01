@@ -8,7 +8,7 @@ import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { getExpenses } from "@/services/sheetsApi";
 import type { SheetRow } from "@/services/sheetsApi";
-import { EXPENSE_CATEGORIES, PIE_COLORS } from "@/lib/constants";
+import { EXPENSE_CATEGORIES, PIE_COLORS, CATEGORY_COLORS } from "@/lib/constants";
 import {
   PieChart,
   Pie,
@@ -362,8 +362,8 @@ export default function ExpensesPage() {
                           return <Sector {...p} style={{ ...p.style, opacity: 0.45 }} />;
                         }}
                       >
-                        {pieData.map((_, i) => (
-                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} style={{ outline: "none" }} />
+                        {pieData.map((row) => (
+                          <Cell key={row.category} fill={CATEGORY_COLORS[row.category] ?? "#888"} style={{ outline: "none" }} />
                         ))}
                       </Pie>
                       <Tooltip
@@ -392,23 +392,23 @@ export default function ExpensesPage() {
                       </tr>
                     </thead>
                     <tbody className="text-white">
-                      {expenseDataWithPct
-                        .filter((d) => d.total > 0)
-                        .map((row, index) => (
-                          <tr key={row.category} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
-                            <td className="py-1.5 pr-2 pl-2 text-gray-200">
-                              <span
-                                className="inline-block w-3 h-3 rounded-sm shrink-0 mr-2 align-middle"
-                                style={{ backgroundColor: PIE_COLORS[index % PIE_COLORS.length] }}
-                                aria-hidden
-                              />
-                              {row.category}
-                            </td>
-                            <td className="py-1.5 text-right pr-2">
-                              {row.pct.toFixed(1)}%
-                            </td>
-                          </tr>
-                        ))}
+                      {[...expenseDataWithPct]
+                        .sort((a, b) => b.pct - a.pct)
+                        .map((row) => (
+                        <tr key={row.category} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
+                          <td className="py-1.5 pr-2 pl-2 text-gray-200">
+                            <span
+                              className="inline-block w-3 h-3 rounded-sm shrink-0 mr-2 align-middle"
+                              style={{ backgroundColor: CATEGORY_COLORS[row.category] ?? "#888" }}
+                              aria-hidden
+                            />
+                            {row.category}
+                          </td>
+                          <td className="py-1.5 text-right pr-2">
+                            {row.pct.toFixed(1)}%
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>

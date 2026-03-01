@@ -30,4 +30,10 @@ export const PIE_COLORS = [
   "#ffffcc", // light yellow
 ];
 
+/** Fixed color per category — same in pie chart and table, consistent month to month */
+export const CATEGORY_COLORS: Record<string, string> = {};
+EXPENSE_CATEGORIES.forEach((cat, i) => {
+  CATEGORY_COLORS[cat] = PIE_COLORS[i % PIE_COLORS.length];
+});
+
 export const BUDGET_STORAGE_KEY = "financial-dashboard-budget-goals";
