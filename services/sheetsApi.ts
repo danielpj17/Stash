@@ -97,12 +97,12 @@ export async function getExpenses(month?: string): Promise<SheetRow[]> {
 
 /**
  * Submit a new expense/income via the API route. Timestamp is added by the script.
+ * Month is not sent; the sheet formula derives it from the timestamp.
  */
 export async function submitExpense(payload: {
   expenseType: string;
   amount: number;
   description: string;
-  month?: string;
 }): Promise<void> {
   const res = await fetch(SHEETS_API, {
     method: "POST",

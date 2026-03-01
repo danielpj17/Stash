@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { PlusCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -70,41 +69,89 @@ function formatLocalDateKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+/** Get days 1..lastDay for the selected month (or 1..today if current month). Year matches app (2026). */
+function getDaysInSelectedMonth(selectedMonth: string): number[] {
+  const monthNum = Number(selectedMonth);
+  if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return [];
+  const year = 2026;
+  const lastDay = new Date(year, monthNum, 0).getDate();
+  const now = new Date();
+  const isCurrentMonth = now.getFullYear() === year && now.getMonth() + 1 === monthNum;
+  const endDay = isCurrentMonth ? Math.min(now.getDate(), lastDay) : lastDay;
+  const days: number[] = [];
+  for (let d = 1; d <= endDay; d++) days.push(d);
+  return days;
+}
+
 function buildDailyExpenses(rows: SheetRow[], selectedMonth: string): DailyPoint[] {
   const expenses = rows.filter((r) => r.expenseType !== "Income");
-  if (expenses.length === 0) return [];
-  const byKey: Record<string, number> = {};
   const isFull = selectedMonth === "full";
+
+  if (isFull) {
+    if (expenses.length === 0) return [];
+    const byKey: Record<string, number> = {};
+    expenses.forEach((r) => {
+      if (!r.timestamp) return;
+      const d = new Date(r.timestamp);
+      if (Number.isNaN(d.getTime())) return;
+      const key = formatLocalDateKey(getWeekStartDate(d));
+      byKey[key] = (byKey[key] ?? 0) + r.amount;
+    });
+    const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
+    return entries.map(([key, amount]) => ({
+      label: formatWeekLabel(new Date(`${key}T00:00:00`)),
+      amount,
+    }));
+  }
+
+  const byKey: Record<string, number> = {};
   expenses.forEach((r) => {
     if (!r.timestamp) return;
     const d = new Date(r.timestamp);
     if (Number.isNaN(d.getTime())) return;
-    const key = isFull ? formatLocalDateKey(getWeekStartDate(d)) : String(d.getDate());
+    const key = String(d.getDate());
     byKey[key] = (byKey[key] ?? 0) + r.amount;
   });
-  const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([key, amount]) => ({
-    label: isFull ? formatWeekLabel(new Date(`${key}T00:00:00`)) : key,
-    amount,
+  const days = getDaysInSelectedMonth(selectedMonth);
+  return days.map((day) => ({
+    label: String(day),
+    amount: byKey[String(day)] ?? 0,
   }));
 }
 
 function buildDailyIncome(rows: SheetRow[], selectedMonth: string): DailyPoint[] {
   const income = rows.filter((r) => r.expenseType === "Income");
-  if (income.length === 0) return [];
-  const byKey: Record<string, number> = {};
   const isFull = selectedMonth === "full";
+
+  if (isFull) {
+    if (income.length === 0) return [];
+    const byKey: Record<string, number> = {};
+    income.forEach((r) => {
+      if (!r.timestamp) return;
+      const d = new Date(r.timestamp);
+      if (Number.isNaN(d.getTime())) return;
+      const key = formatLocalDateKey(getWeekStartDate(d));
+      byKey[key] = (byKey[key] ?? 0) + r.amount;
+    });
+    const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
+    return entries.map(([key, amount]) => ({
+      label: formatWeekLabel(new Date(`${key}T00:00:00`)),
+      amount,
+    }));
+  }
+
+  const byKey: Record<string, number> = {};
   income.forEach((r) => {
     if (!r.timestamp) return;
     const d = new Date(r.timestamp);
     if (Number.isNaN(d.getTime())) return;
-    const key = isFull ? formatLocalDateKey(getWeekStartDate(d)) : String(d.getDate());
+    const key = String(d.getDate());
     byKey[key] = (byKey[key] ?? 0) + r.amount;
   });
-  const entries = Object.entries(byKey).sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([key, amount]) => ({
-    label: isFull ? formatWeekLabel(new Date(`${key}T00:00:00`)) : key,
-    amount,
+  const days = getDaysInSelectedMonth(selectedMonth);
+  return days.map((day) => ({
+    label: String(day),
+    amount: byKey[String(day)] ?? 0,
   }));
 }
 
@@ -121,10 +168,7 @@ const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
-const MOBILE_BREAKPOINT_PX = 768;
-
 export default function ExpensesPage() {
-  const router = useRouter();
   const { selectedMonth, selectedLabel } = useMonth();
   const { refreshKey } = useRefresh();
   const [rows, setRows] = useState<SheetRow[]>([]);
@@ -132,17 +176,6 @@ export default function ExpensesPage() {
   const [error, setError] = useState<string | null>(null);
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
-  const [mobileCheckDone, setMobileCheckDone] = useState(false);
-
-  // On phone viewports, default to the new expense page
-  useEffect(() => {
-    const isMobile = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`).matches;
-    if (isMobile) {
-      router.replace("/new-expense");
-      return;
-    }
-    setMobileCheckDone(true);
-  }, [router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,7 +222,7 @@ export default function ExpensesPage() {
     }));
   }, [expenseData, expenseTotal]);
 
-  if (!mobileCheckDone || loading) {
+  if (loading) {
     return (
       <DashboardLayout>
         <div className="flex items-center justify-center min-h-[40vh] text-gray-400">
@@ -411,7 +444,7 @@ export default function ExpensesPage() {
                           }}
                           labelStyle={{ color: "#CCCCCC" }}
                         />
-                        <Line type="stepAfter" dataKey="amount" stroke="#4EA8FF" strokeWidth={2} dot={{ fill: "#4EA8FF" }} name="Expenses" />
+                        <Line type="stepAfter" dataKey="amount" stroke="#4EA8FF" strokeWidth={2} dot={false} name="Expenses" />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -445,7 +478,7 @@ export default function ExpensesPage() {
                           }}
                           labelStyle={{ color: "#CCCCCC" }}
                         />
-                        <Line type="stepAfter" dataKey="amount" stroke="#50C878" strokeWidth={2} dot={{ fill: "#50C878" }} name="Income" />
+                        <Line type="stepAfter" dataKey="amount" stroke="#50C878" strokeWidth={2} dot={false} name="Income" />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>

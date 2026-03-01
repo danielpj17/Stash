@@ -3,6 +3,7 @@
  *
  * SETUP:
  * 1. Create a Google Sheet with headers in row 1: Timestamp | Expense Type | Amount | Description | Month
+ *    (Month can be a formula, e.g. =TEXT(A2,"mmmm") or an array formula over column A; the script does not write Month.)
  * 2. Copy the Sheet ID from the URL: https://docs.google.com/spreadsheets/d/THIS_PART_IS_THE_SHEET_ID/edit
  * 3. Extensions > Apps Script, paste this code. Replace SPREADSHEET_ID below with your Sheet ID.
  * 4. Deploy > New deployment > Web app > Execute as: Me, Who has access: Anyone. Copy the /exec URL.
@@ -51,9 +52,9 @@ function doPost(e) {
   const expenseType = payload.expenseType || "";
   const amount = Number(payload.amount) || 0;
   const description = payload.description || "";
-  const month = payload.month || "";
 
-  sheet.appendRow([timestamp, expenseType, amount, description, month]);
+  // Append only Timestamp, Expense Type, Amount, Description. Leave Month to the sheet formula (from timestamp).
+  sheet.appendRow([timestamp, expenseType, amount, description]);
 
   return ContentService.createTextOutput(JSON.stringify({ success: true }))
     .setMimeType(ContentService.MimeType.JSON);
