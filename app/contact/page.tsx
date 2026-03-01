@@ -25,7 +25,7 @@ export default function ContactPage() {
             className="inline-flex items-center gap-2 text-accent hover:text-accent-light transition-colors"
           >
             <Mail className="w-4 h-4" />
-            support@example.com
+            danieljohnson6@gmail.com
           </a>
         </div>
       </div>
