@@ -3,7 +3,7 @@ import "./globals.css";
 import Providers from "@/components/Providers";
 
 export const metadata: Metadata = {
-  title: "Financial Dashboard",
+  title: "Stash",
   description: "Track expenses, budget, and net worth",
 };
 

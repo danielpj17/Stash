@@ -16,9 +16,9 @@ const config: Config = {
         },
         tileRowAlt: "#2C2C2C",
         accent: {
-          DEFAULT: "#59D58E",
-          light: "#6EE0A0",
-          dark: "#3BC77A",
+          DEFAULT: "#50C878",
+          light: "#6DD493",
+          dark: "#3DB368",
         },
       },
     },

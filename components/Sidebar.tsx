@@ -49,13 +49,13 @@ export default function Sidebar() {
         <div className="flex items-center justify-between p-4 border-b border-charcoal-dark shrink-0">
           {!collapsed && (
             <span className="font-semibold text-white text-lg tracking-tight">
-              Financial
+              Stash
             </span>
           )}
           <button
             type="button"
             onClick={toggleCollapsed}
-            className="hidden lg:block p-2 rounded-lg text-gray-400 hover:text-[#59D58E] hover:bg-charcoal transition-colors"
+            className="hidden lg:block p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             <Menu className="w-5 h-5" />
@@ -84,7 +84,7 @@ export default function Sidebar() {
                 flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors
                 ${
                   isActive
-                    ? "bg-[#59D58E] text-white"
+                    ? "bg-[#50C878] text-white"
                     : "text-gray-300 hover:bg-charcoal hover:text-white"
                 }
                 ${collapsed ? "justify-center px-2" : ""}
@@ -100,7 +100,7 @@ export default function Sidebar() {
       {/* Optional bottom area */}
       <div className="p-3 border-t border-charcoal-dark shrink-0">
         {!collapsed && (
-          <p className="text-xs text-gray-500 px-3">Financial Dashboard v1</p>
+          <p className="text-xs text-gray-500 px-3">Stash v1</p>
         )}
       </div>
     </aside>

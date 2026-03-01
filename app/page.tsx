@@ -206,7 +206,7 @@ export default function ExpensesPage() {
           <h1 className="text-xl font-semibold text-white">Expenses</h1>
           <Link
             href="/new-expense"
-            className="p-2 rounded-lg text-gray-400 hover:text-[#59D58E] hover:bg-charcoal transition-colors"
+            className="p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors"
             aria-label="New expense"
           >
             <PlusCircle className="w-6 h-6" />
@@ -445,7 +445,7 @@ export default function ExpensesPage() {
                           }}
                           labelStyle={{ color: "#CCCCCC" }}
                         />
-                        <Line type="stepAfter" dataKey="amount" stroke="#73D67E" strokeWidth={2} dot={{ fill: "#73D67E" }} name="Income" />
+                        <Line type="stepAfter" dataKey="amount" stroke="#50C878" strokeWidth={2} dot={{ fill: "#50C878" }} name="Income" />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>

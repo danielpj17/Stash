@@ -26,7 +26,7 @@ export default function MonthDropdown() {
         className="
           flex items-center gap-2 px-4 py-2 rounded-lg
           bg-[#353535] border border-charcoal-dark
-          text-gray-200 hover:border-[#59D58E]/50 hover:text-white
+          text-gray-200 hover:border-[#50C878]/50 hover:text-white
           transition-colors min-w-[180px] justify-between
         "
         aria-haspopup="listbox"
@@ -34,7 +34,7 @@ export default function MonthDropdown() {
         aria-label="Select month"
       >
         <span className="flex items-center gap-2 truncate">
-          <Calendar className="w-4 h-4 text-[#59D58E] shrink-0" />
+          <Calendar className="w-4 h-4 text-[#50C878] shrink-0" />
           <span className="truncate">{selectedLabel}</span>
         </span>
         <ChevronDown
@@ -61,7 +61,7 @@ export default function MonthDropdown() {
                 }}
                 className={`
                   w-full text-left px-4 py-2.5 text-sm transition-colors
-                  ${selectedMonth === opt.value ? "bg-[#59D58E]/20 text-[#59D58E]" : "text-gray-300 hover:bg-charcoal hover:text-white"}
+                  ${selectedMonth === opt.value ? "bg-[#50C878]/20 text-[#50C878]" : "text-gray-300 hover:bg-charcoal hover:text-white"}
                 `}
               >
                 {opt.label}

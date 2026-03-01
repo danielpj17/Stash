@@ -1,5 +1,5 @@
 /**
- * Google Apps Script sample for the Financial Dashboard Web App backend.
+ * Google Apps Script sample for the Stash Web App backend.
  *
  * SETUP:
  * 1. Create a Google Sheet with headers in row 1: Timestamp | Expense Type | Amount | Description | Month

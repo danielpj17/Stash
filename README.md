@@ -1,4 +1,4 @@
-# Financial Dashboard
+# Stash
 
 A responsive financial dashboard built with **Next.js 14**, **Tailwind CSS**, and **Lucide React** icons. Charcoal background with light blue accents.
 

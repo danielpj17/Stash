@@ -13,12 +13,12 @@ export default function Header() {
         <button
           type="button"
           onClick={toggleMobile}
-          className="lg:hidden p-2 -ml-2 rounded-lg text-gray-400 hover:text-[#59D58E] hover:bg-charcoal-dark transition-colors"
+          className="lg:hidden p-2 -ml-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal-dark transition-colors"
           aria-label="Open menu"
         >
           <Menu className="w-5 h-5" />
         </button>
-        <span className="text-sm font-medium">Financial Dashboard</span>
+        <span className="text-sm font-medium">Stash</span>
       </div>
       <div className="flex items-center gap-3">
         <MonthDropdown />

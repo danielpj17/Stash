@@ -18,7 +18,7 @@ export const EXPENSE_TYPE_OPTIONS = [...EXPENSE_CATEGORIES, "Income"] as const;
 
 export const PIE_COLORS = [
   "#F9B43B", // orange
-  "#59D58E", // green
+  "#50C878", // green
   "#9D59D5", // purple
   "#FF5C5C", // red
   "#3BDBB4", // teal
