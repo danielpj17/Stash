@@ -1,0 +1,37 @@
+"use client";
+
+import Link from "next/link";
+import { Mail, ArrowLeft } from "lucide-react";
+import DashboardLayout from "@/components/DashboardLayout";
+
+export default function ContactPage() {
+  return (
+    <DashboardLayout>
+      <div className="max-w-lg mx-auto py-8">
+        <Link
+          href="/"
+          className="inline-flex items-center gap-2 text-sm text-gray-400 hover:text-accent transition-colors mb-8"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Back to dashboard
+        </Link>
+        <div className="rounded-xl border border-charcoal-dark bg-charcoal-light/50 p-6 md:p-8">
+          <h1 className="text-xl font-semibold text-gray-100 mb-2">Contact</h1>
+          <p className="text-gray-400 text-sm mb-6">
+            Get in touch about Stash or report an issue.
+          </p>
+          <a
+            href="mailto:support@example.com"
+            className="inline-flex items-center gap-2 text-accent hover:text-accent-light transition-colors"
+          >
+            <Mail className="w-4 h-4" />
+            support@example.com
+          </a>
+          <p className="text-gray-500 text-xs mt-4">
+            Replace this email in <code className="text-gray-400">app/contact/page.tsx</code> with your preferred address.
+          </p>
+        </div>
+      </div>
+    </DashboardLayout>
+  );
+}
