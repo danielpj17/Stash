@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import { PlusCircle } from "lucide-react";
+import { PlusCircle, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { getExpenses } from "@/services/sheetsApi";
@@ -35,17 +36,6 @@ function buildExpenseTotals(rows: SheetRow[]): { category: string; total: number
     category: cat,
     total: byCategory[cat] ?? 0,
   }));
-}
-
-function buildIncomeLineItems(rows: SheetRow[]): { description: string; amount: number }[] {
-  const income = rows.filter((r) => r.expenseType === "Income");
-  if (income.length === 0) return [];
-  const byDesc: Record<string, number> = {};
-  income.forEach((r) => {
-    const key = r.description.trim() || "Income";
-    byDesc[key] = (byDesc[key] ?? 0) + r.amount;
-  });
-  return Object.entries(byDesc).map(([description, amount]) => ({ description, amount }));
 }
 
 type DailyPoint = { label: string; amount: number };
@@ -164,6 +154,17 @@ function toCumulative(points: DailyPoint[]): DailyPoint[] {
   });
 }
 
+function formatDateMMDDYY(timestamp?: string): string {
+  if (!timestamp) return "—";
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "2-digit",
+  });
+}
+
 const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
@@ -176,6 +177,18 @@ export default function ExpensesPage() {
   const [error, setError] = useState<string | null>(null);
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+
+  const categoryTransactions = useMemo(() => {
+    if (!selectedCategory) return [];
+    return rows
+      .filter((r) => r.expenseType === selectedCategory)
+      .sort((a, b) => {
+        const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tB - tA;
+      });
+  }, [rows, selectedCategory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,14 +209,32 @@ export default function ExpensesPage() {
     };
   }, [selectedMonth, refreshKey]);
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedCategory(null);
+    };
+    if (selectedCategory) {
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }
+  }, [selectedCategory]);
+
   const expenseData = useMemo(() => buildExpenseTotals(rows), [rows]);
   const pieData = useMemo(
     () => expenseData.filter((d) => d.total > 0),
     [expenseData]
   );
   const expenseTotal = expenseData.reduce((sum, r) => sum + r.total, 0);
-  const incomeItems = useMemo(() => buildIncomeLineItems(rows), [rows]);
-  const incomeTotal = incomeItems.reduce((sum, r) => sum + r.amount, 0);
+  const incomeTransactions = useMemo(() => {
+    return rows
+      .filter((r) => r.expenseType === "Income")
+      .sort((a, b) => {
+        const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tB - tA;
+      });
+  }, [rows]);
+  const incomeTotal = incomeTransactions.reduce((sum, r) => sum + r.amount, 0);
 
   const dailyExpenses = useMemo(
     () => toCumulative(buildDailyExpenses(rows, selectedMonth)),
@@ -235,15 +266,18 @@ export default function ExpensesPage() {
   return (
     <DashboardLayout>
       <div className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h1 className="text-xl font-semibold text-white">Expenses</h1>
-          <Link
-            href="/new-expense"
-            className="p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors"
-            aria-label="New expense"
-          >
-            <PlusCircle className="w-6 h-6" />
-          </Link>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h1 className="text-2xl font-semibold text-white">Expenses</h1>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/new-expense"
+              className="p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors"
+              aria-label="New expense"
+            >
+              <PlusCircle className="w-6 h-6" />
+            </Link>
+            <MonthDropdown />
+          </div>
         </div>
         {error && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-2 text-sm">
@@ -278,15 +312,17 @@ export default function ExpensesPage() {
                 {expensesTab === "expenses" ? (
                   <div className="text-sm -mx-2">
                     {expenseData.map((row, index) => (
-                      <div
+                      <button
+                        type="button"
                         key={row.category}
-                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                        onClick={() => setSelectedCategory(row.category)}
+                        className={`w-full flex justify-between text-white px-2 py-1.5 text-left cursor-pointer hover:bg-[#333] transition-colors ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                       >
                         <span className="text-gray-300">{row.category}</span>
                         <span className="text-right">
                           ${row.total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 ) : (
@@ -308,17 +344,20 @@ export default function ExpensesPage() {
               </div>
               <div className="p-4 flex-1 min-h-0 bg-[#252525]">
                 <div className="min-h-[180px] text-sm -mx-2">
-                  {incomeItems.length === 0 ? (
+                  {incomeTransactions.length === 0 ? (
                     <p className="text-gray-400 px-2 py-2">No income entries for this period.</p>
                   ) : (
-                    incomeItems.map((row, index) => (
+                    incomeTransactions.map((row, index) => (
                       <div
-                        key={row.description}
-                        className={`flex justify-between text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                        key={`${row.timestamp ?? index}-${row.amount}-${row.description}`}
+                        className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                       >
-                        <span className="text-gray-300">{row.description}</span>
-                        <span className="text-right">
-                          ${row.amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                        <span className="min-w-0 flex-1">
+                          <span className="text-gray-200">{row.description.trim() || "Income"}</span>
+                          <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
+                        </span>
+                        <span className="text-right shrink-0">
+                          ${row.amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
                       </div>
                     ))
@@ -336,18 +375,21 @@ export default function ExpensesPage() {
                   Expense Distribution — {selectedLabel}
                 </h2>
               </div>
-              <div className="p-4 flex-1 min-h-0 bg-[#252525]">
-                <div className="h-56 w-full p-2 expense-pie-chart">
+              <div className="p-2 flex-1 min-h-0 bg-[#252525]">
+                <div
+                  className="h-56 w-full expense-pie-chart"
+                  onMouseLeave={() => setActivePieIndex(null)}
+                >
                   <ResponsiveContainer width="100%" height="100%">
-                    <PieChart margin={{ top: 8, right: 80, bottom: 8, left: 80 }}>
+                    <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
                       <Pie
                         data={pieData}
                         dataKey="total"
                         nameKey="category"
                         cx="50%"
                         cy="50%"
-                        innerRadius={44}
-                        outerRadius={66}
+                        innerRadius="62%"
+                        outerRadius="88%"
                         paddingAngle={2}
                         activeIndex={activePieIndex ?? undefined}
                         onMouseEnter={(_data, index) => setActivePieIndex(index)}
@@ -355,11 +397,11 @@ export default function ExpensesPage() {
                         style={{ outline: "none" }}
                         activeShape={(props: unknown) => {
                           const p = props as React.ComponentProps<typeof Sector> & { style?: React.CSSProperties };
-                          return <Sector {...p} stroke="none" style={{ ...p.style, outline: "none" }} />;
+                          return <Sector {...p} stroke="white" strokeWidth={2} style={{ ...p.style, outline: "none" }} />;
                         }}
                         inactiveShape={(props: unknown) => {
                           const p = props as React.ComponentProps<typeof Sector> & { style?: React.CSSProperties };
-                          return <Sector {...p} style={{ ...p.style, opacity: 0.45 }} />;
+                          return <Sector {...p} stroke="none" style={{ ...p.style, opacity: 0.45 }} />;
                         }}
                       >
                         {pieData.map((row) => (
@@ -367,18 +409,26 @@ export default function ExpensesPage() {
                         ))}
                       </Pie>
                       <Tooltip
-                        formatter={(value: number, name: string) => {
-                          const pct = expenseTotal > 0 ? (value / expenseTotal) * 100 : 0;
-                          return [`${name}: ${pct.toFixed(1)}%`, "Share"];
+                        active={activePieIndex !== null}
+                        content={() => {
+                          if (activePieIndex == null || expenseTotal <= 0) return null;
+                          const row = pieData[activePieIndex];
+                          if (!row) return null;
+                          const pct = (row.total / expenseTotal) * 100;
+                          return (
+                            <div
+                              style={{
+                                backgroundColor: "#282828",
+                                border: "1px solid #333333",
+                                borderRadius: "8px",
+                                color: "#e5e7eb",
+                                padding: "8px 12px",
+                              }}
+                            >
+                              {row.category}: {pct.toFixed(1)}%
+                            </div>
+                          );
                         }}
-                        contentStyle={{
-                          backgroundColor: "#282828",
-                          border: "1px solid #333333",
-                          borderRadius: "8px",
-                          color: "#e5e7eb",
-                        }}
-                        labelStyle={{ color: "#CCCCCC" }}
-                        itemStyle={{ color: "#e5e7eb" }}
                       />
                     </PieChart>
                   </ResponsiveContainer>
@@ -487,6 +537,63 @@ export default function ExpensesPage() {
             </div>
           </div>
         </div>
+
+        {/* Category detail modal: click outside to close */}
+        {selectedCategory && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+            onClick={() => setSelectedCategory(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="category-modal-title"
+          >
+            <div
+              className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col w-full max-w-lg max-h-[80vh] shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3 shrink-0">
+                <h2 id="category-modal-title" className="text-white font-semibold">
+                  {selectedCategory}
+                  {categoryTransactions.length > 0 && (
+                    <span className="ml-2 font-medium text-gray-300">
+                      — Total: ${categoryTransactions.reduce((sum, r) => sum + r.amount, 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  )}
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategory(null)}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                  aria-label="Close"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-4 flex-1 min-h-0 overflow-y-auto">
+                <div className="text-sm -mx-2">
+                  {categoryTransactions.length === 0 ? (
+                    <p className="text-gray-400 px-2 py-2">No transactions in this category for this period.</p>
+                  ) : (
+                    categoryTransactions.map((row, index) => (
+                      <div
+                        key={`${row.timestamp ?? index}-${row.amount}-${row.description}`}
+                        className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="text-gray-200">{row.description.trim() || "—"}</span>
+                          <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
+                        </span>
+                        <span className="text-right shrink-0">
+                          ${row.amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </DashboardLayout>
   );

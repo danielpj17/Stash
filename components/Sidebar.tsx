@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   PlusCircle,
-  FileText,
   Wallet,
   PiggyBank,
   TrendingUp,
@@ -14,7 +13,6 @@ import { useSidebar } from "@/contexts/SidebarContext";
 
 const navItems = [
   { href: "/new-expense", label: "New Expense", icon: PlusCircle },
-  { href: "/expense-form", label: "Expense Form", icon: FileText },
   { href: "/", label: "Expenses", icon: Wallet },
   { href: "/budget", label: "Budget", icon: PiggyBank },
   { href: "/net-worth", label: "Net Worth", icon: TrendingUp },
