@@ -10,6 +10,7 @@ import {
   Menu,
 } from "lucide-react";
 import { useSidebar } from "@/contexts/SidebarContext";
+import StashLogo from "./StashLogo";
 
 const navItems = [
   { href: "/new-expense", label: "New Expense", icon: PlusCircle },
@@ -43,13 +44,21 @@ export default function Sidebar() {
           ${mobileOpen ? "max-lg:translate-x-0" : "max-lg:-translate-x-full"}
         `}
       >
-        {/* Top: Logo + hamburger */}
-        <div className="flex items-center justify-between p-4 border-b border-charcoal-dark shrink-0">
-          {!collapsed && (
-            <span className="font-semibold text-white text-lg tracking-tight">
-              Stash
+        {/* Top: Logo + Stash + hamburger */}
+        <div className="flex items-center justify-between gap-2 py-4 px-4 border-b border-charcoal-dark shrink-0 min-h-[4rem]">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <span
+              className="flex items-center justify-center shrink-0 text-accent overflow-visible"
+              style={{ width: "1.75rem", height: "1.75rem", minWidth: "1.75rem", minHeight: "1.75rem" }}
+            >
+              <StashLogo />
             </span>
-          )}
+            {!collapsed && (
+              <span className="font-semibold text-white text-xl tracking-tight truncate leading-none">
+                Stash
+              </span>
+            )}
+          </div>
           <button
             type="button"
             onClick={toggleCollapsed}
