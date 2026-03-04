@@ -391,6 +391,8 @@ export default function ExpensesPage() {
                         innerRadius="62%"
                         outerRadius="88%"
                         paddingAngle={2}
+                        startAngle={90}
+                        endAngle={-270}
                         activeIndex={activePieIndex ?? undefined}
                         onMouseEnter={(_data, index) => setActivePieIndex(index)}
                         onMouseLeave={() => setActivePieIndex(null)}
