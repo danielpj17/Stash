@@ -403,14 +403,18 @@ export default function BudgetPage() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const msg = typeof body?.error === "string" ? body.error : "Failed to save budget. Try again.";
+        const msg =
+          typeof body?.error === "string"
+            ? body.error
+            : `Save failed (${res.status}). Check Vercel logs if deployed.`;
         setError(msg);
         return;
       }
       setAllBudgets((body as MonthlyBudgets) ?? next);
       setError(null);
-    } catch {
-      setError("Failed to save budget. Try again.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to save budget. Try again.";
+      setError(msg);
     }
   }, [selectedCategory, selectedMonth, editBudgetValue, allBudgets]);
 

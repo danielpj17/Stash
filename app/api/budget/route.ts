@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 /** Stored shape: { "1": { "Groceries": 500 }, ... } — only months that have been saved */
 type MonthlyBudgets = Record<string, Record<string, number>>;
 
@@ -65,15 +68,10 @@ export async function PUT(request: NextRequest) {
   }
   try {
     const sql = neon(connectionString);
-    const json = JSON.stringify(data);
-    await sql`
-      INSERT INTO budget_store (id, data)
-      VALUES (1, ${json}::jsonb)
-      ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data
-    `;
+    await sql`INSERT INTO budget_store (id, data) VALUES (1, ${data}) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data`;
     return NextResponse.json(data);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to save budget";
+    const message = err instanceof Error ? err.message : String(err);
     console.error("Budget PUT error:", err);
     return NextResponse.json({ error: message }, { status: 502 });
   }
