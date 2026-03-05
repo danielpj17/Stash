@@ -807,24 +807,31 @@ export default function BudgetPage() {
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
                 <h2 className="text-white font-semibold">Account Balances</h2>
               </div>
-              <div className="p-4 bg-[#252525]">
-                <ul className="space-y-2 text-sm">
-                  {Object.entries(accountBalances).map(([name, balance], index) => (
-                    <li
-                      key={name}
-                      className={`flex justify-between items-baseline gap-3 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"} px-3 py-2 rounded-lg`}
-                    >
-                      <span className="text-gray-200 truncate">{name}</span>
-                      <span
-                        className={`tabular-nums shrink-0 font-medium ${
-                          balance < 0 ? "text-red-400" : "text-white"
-                        }`}
-                      >
-                        {balance < 0 ? `(${fmtDollars(Math.abs(balance))})` : fmtDollars(balance)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+              <div className="p-3 flex-1 min-h-0 bg-[#252525]">
+                <div className="overflow-x-auto -mx-2">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-400 border-b border-charcoal-dark">
+                        <th className="pb-1.5 pr-2 pl-2">Account</th>
+                        <th className="pb-1.5 text-right pr-2">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-white">
+                      {Object.entries(accountBalances).map(([name, balance]) => (
+                        <tr key={name} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
+                          <td className="py-1.5 pr-2 pl-2 text-gray-200">{name}</td>
+                          <td
+                            className={`py-1.5 text-right pr-2 tabular-nums ${
+                              balance < 0 ? "text-red-400" : ""
+                            }`}
+                          >
+                            {balance < 0 ? `(${fmtDollars(Math.abs(balance))})` : fmtDollars(balance)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </div>
