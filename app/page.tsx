@@ -311,7 +311,9 @@ export default function ExpensesPage() {
               <div className="p-4 flex-1 min-h-0 bg-[#252525]">
                 {expensesTab === "expenses" ? (
                   <div className="text-sm -mx-2">
-                    {expenseData.map((row, index) => (
+                    {[...expenseData]
+                      .sort((a, b) => a.category.localeCompare(b.category))
+                      .map((row, index) => (
                       <button
                         type="button"
                         key={row.category}

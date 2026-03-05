@@ -25,72 +25,46 @@ import {
 } from "recharts";
 
 /* ------------------------------------------------------------------ */
-/*  Budget storage — per-month with migration from old flat format     */
+/*  Budget: resolve display goals (copy from previous month if unset)   */
 /* ------------------------------------------------------------------ */
 
 type MonthlyBudgets = Record<string, Record<string, number>>;
 
-function isOldFlatFormat(parsed: Record<string, unknown>): boolean {
-  const keys = Object.keys(parsed);
-  if (keys.length === 0) return false;
-  return EXPENSE_CATEGORIES.some((cat) => typeof parsed[cat] === "number");
-}
+function resolveBudgetForMonth(
+  month: string,
+  allBudgets: MonthlyBudgets | null,
+  visited: Set<string> = new Set()
+): Record<string, number> {
+  const zeros: Record<string, number> = {};
+  EXPENSE_CATEGORIES.forEach((cat) => (zeros[cat] = 0));
+  if (!allBudgets || typeof allBudgets !== "object") return zeros;
 
-function loadAllBudgets(): MonthlyBudgets {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-
-    if (isOldFlatFormat(parsed)) {
-      const goals: Record<string, number> = {};
-      EXPENSE_CATEGORIES.forEach((cat) => {
-        const v = parsed[cat];
-        if (typeof v === "number") goals[cat] = v;
-      });
-      const migrated: MonthlyBudgets = {};
-      for (let m = 1; m <= 12; m++) migrated[String(m)] = { ...goals };
-      localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(migrated));
-      return migrated;
-    }
-
-    return parsed as MonthlyBudgets;
-  } catch {
-    return {};
-  }
-}
-
-function loadMonthBudget(month: string): Record<string, number> {
-  const all = loadAllBudgets();
   if (month === "full") {
     const totals: Record<string, number> = {};
     EXPENSE_CATEGORIES.forEach((cat) => (totals[cat] = 0));
     for (let m = 1; m <= 12; m++) {
-      const md = all[String(m)] ?? {};
+      const md = allBudgets[String(m)] ?? {};
       EXPENSE_CATEGORIES.forEach((cat) => {
         totals[cat] += md[cat] ?? 0;
       });
     }
     return totals;
   }
-  const md = all[month] ?? {};
-  const result: Record<string, number> = {};
-  EXPENSE_CATEGORIES.forEach((cat) => {
-    result[cat] = md[cat] ?? 0;
-  });
-  return result;
-}
 
-function saveCategoryBudget(month: string, category: string, amount: number) {
-  if (typeof window === "undefined") return;
-  const all = loadAllBudgets();
-  if (!all[month]) {
-    all[month] = {};
-    EXPENSE_CATEGORIES.forEach((cat) => (all[month][cat] = 0));
+  if (visited.has(month)) return zeros;
+  visited.add(month);
+
+  const md = allBudgets[month];
+  if (md !== undefined && md !== null && typeof md === "object") {
+    const result: Record<string, number> = {};
+    EXPENSE_CATEGORIES.forEach((cat) => {
+      result[cat] = md[cat] ?? 0;
+    });
+    return result;
   }
-  all[month][category] = amount;
-  localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(all));
+
+  const prevMonth = month === "1" ? "12" : String(Number(month) - 1);
+  return resolveBudgetForMonth(prevMonth, allBudgets, visited);
 }
 
 /* ------------------------------------------------------------------ */
@@ -258,15 +232,65 @@ export default function BudgetPage() {
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [budgetGoals, setBudgetGoals] = useState<Record<string, number>>({});
+  const [allBudgets, setAllBudgets] = useState<MonthlyBudgets | null>(null);
 
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [editBudgetValue, setEditBudgetValue] = useState("");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
 
+  const budgetGoals = useMemo(
+    () => resolveBudgetForMonth(selectedMonth, allBudgets),
+    [selectedMonth, allBudgets]
+  );
+
   useEffect(() => {
-    setBudgetGoals(loadMonthBudget(selectedMonth));
-  }, [selectedMonth]);
+    let cancelled = false;
+    fetch("/api/budget", { cache: "no-store" })
+      .then((res) => res.json())
+      .then(async (data) => {
+        if (cancelled) return;
+        const isEmpty = !data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length === 0;
+        if (isEmpty && typeof window !== "undefined") {
+          try {
+            const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
+            if (raw) {
+              const parsed = JSON.parse(raw) as Record<string, unknown>;
+              const isOldFlat = Object.keys(parsed).length > 0 && EXPENSE_CATEGORIES.some((cat) => typeof parsed[cat] === "number");
+              let toSave: MonthlyBudgets;
+              if (isOldFlat) {
+                const goals: Record<string, number> = {};
+                EXPENSE_CATEGORIES.forEach((cat) => {
+                  const v = parsed[cat];
+                  if (typeof v === "number") goals[cat] = v;
+                });
+                toSave = {};
+                for (let m = 1; m <= 12; m++) toSave[String(m)] = { ...goals };
+              } else {
+                toSave = parsed as MonthlyBudgets;
+              }
+              const res = await fetch("/api/budget", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(toSave),
+              });
+              if (res.ok) {
+                localStorage.removeItem(BUDGET_STORAGE_KEY);
+                const saved = (await res.json()) as MonthlyBudgets;
+                if (!cancelled) setAllBudgets(saved);
+                return;
+              }
+            }
+          } catch {
+            /* ignore migration errors */
+          }
+        }
+        if (!cancelled && data && typeof data === "object" && !Array.isArray(data))
+          setAllBudgets(data as MonthlyBudgets);
+        else if (!cancelled) setAllBudgets({});
+      })
+      .catch(() => { if (!cancelled) setAllBudgets({}); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -360,13 +384,30 @@ export default function BudgetPage() {
     setEditBudgetValue(String(budgetGoals[cat] ?? 0));
   }, [budgetGoals]);
 
-  const handleSaveBudget = useCallback(() => {
+  const handleSaveBudget = useCallback(async () => {
     if (!selectedCategory || selectedMonth === "full") return;
     const num = parseFloat(editBudgetValue.replace(/,/g, ""));
     const amount = Number.isNaN(num) ? 0 : num;
-    saveCategoryBudget(selectedMonth, selectedCategory, amount);
-    setBudgetGoals((prev) => ({ ...prev, [selectedCategory]: amount }));
-  }, [selectedCategory, selectedMonth, editBudgetValue]);
+    const base = allBudgets ?? {};
+    const monthData = { ...(base[selectedMonth] ?? {}) };
+    EXPENSE_CATEGORIES.forEach((cat) => {
+      if (monthData[cat] === undefined) monthData[cat] = 0;
+    });
+    monthData[selectedCategory] = amount;
+    const next: MonthlyBudgets = { ...base, [selectedMonth]: monthData };
+    try {
+      const res = await fetch("/api/budget", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!res.ok) throw new Error("Failed to save");
+      const data = (await res.json()) as MonthlyBudgets;
+      setAllBudgets(data);
+    } catch {
+      setError("Failed to save budget. Try again.");
+    }
+  }, [selectedCategory, selectedMonth, editBudgetValue, allBudgets]);
 
   /* ---------- render ---------- */
 
@@ -432,7 +473,9 @@ export default function BudgetPage() {
                 </div>
 
                 <div className="-mx-0">
-                  {expenseData.map((row, index) => {
+                  {[...expenseData]
+                    .sort((a, b) => a.category.localeCompare(b.category))
+                    .map((row, index) => {
                     const budget = budgetGoals[row.category] ?? 0;
                     const pct = budget > 0 ? (row.total / budget) * 100 : 0;
                     const barColor = getProgressColor(pct);
