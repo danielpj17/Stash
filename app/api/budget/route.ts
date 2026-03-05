@@ -73,10 +73,8 @@ export async function PUT(request: NextRequest) {
     `;
     return NextResponse.json(data);
   } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to save budget";
     console.error("Budget PUT error:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to save budget" },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

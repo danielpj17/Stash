@@ -401,9 +401,14 @@ export default function BudgetPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next),
       });
-      if (!res.ok) throw new Error("Failed to save");
-      const data = (await res.json()) as MonthlyBudgets;
-      setAllBudgets(data);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = typeof body?.error === "string" ? body.error : "Failed to save budget. Try again.";
+        setError(msg);
+        return;
+      }
+      setAllBudgets((body as MonthlyBudgets) ?? next);
+      setError(null);
     } catch {
       setError("Failed to save budget. Try again.");
     }
