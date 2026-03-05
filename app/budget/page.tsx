@@ -216,6 +216,16 @@ function toCumulative(points: DailyPoint[]): DailyPoint[] {
 const fmtDollars = (n: number) =>
   "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
+
+/* Base account balances (not tied to data yet except Wells Fargo Checking) */
+const BASE_ACCOUNT_BALANCES = {
+  "Wells Fargo Checking": 101.14,
+  "Wells Fargo Savings": 711.13,
+  "CapitalOne Credit": -18.26,
+  Venmo: 102.61,
+  Fidelity: 9756.14,
+  Robinhood: 0,
+} as const;
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
@@ -358,6 +368,21 @@ export default function BudgetPage() {
       pct: (d.value / totalBudget) * 100,
     }));
   }, [budgetPieData, totalBudget]);
+
+  const legendTableData = useMemo(() => {
+    return EXPENSE_CATEGORIES.map((cat) => {
+      const value = expenseData.find((d) => d.category === cat)?.total ?? 0;
+      const catBudget = budgetGoals[cat] ?? 0;
+      const pct = totalBudget > 0 ? (value / totalBudget) * 100 : 0;
+      return {
+        category: cat,
+        value,
+        pct,
+        isOverBudget: catBudget > 0 && value > catBudget,
+      };
+    });
+  }, [expenseData, totalBudget, budgetGoals]);
+
   const pieChartData = useMemo(() => {
     if (totalBudget <= 0) return [];
     const spentValue = budgetPieData.reduce((sum, d) => sum + d.value, 0);
@@ -376,6 +401,15 @@ export default function BudgetPage() {
     () => toCumulative(buildDailyIncome(rows, selectedMonth)),
     [rows, selectedMonth]
   );
+
+  /* Wells Fargo Checking updates with income (add) and expenses (subtract) */
+  const accountBalances = useMemo(() => {
+    const checkingDelta = incomeTotal - expenseTotal;
+    return {
+      ...BASE_ACCOUNT_BALANCES,
+      "Wells Fargo Checking": BASE_ACCOUNT_BALANCES["Wells Fargo Checking"] + checkingDelta,
+    };
+  }, [incomeTotal, expenseTotal]);
 
   /* ---------- actions ---------- */
 
@@ -569,8 +603,8 @@ export default function BudgetPage() {
                     Set a budget to see the chart.
                   </div>
                 ) : (
-                  <>
-                    <div className="h-56 w-full" onMouseLeave={() => setActivePieIndex(null)}>
+                  <div onMouseLeave={() => setActivePieIndex(null)}>
+                    <div className="h-56 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
                           <Pie
@@ -629,8 +663,8 @@ export default function BudgetPage() {
                                 <Cell
                                   key={slice.category}
                                   fill={color}
-                                  stroke={slice.isOverBudget ? "#FF5C5C" : "white"}
-                                  strokeWidth={slice.isOverBudget ? 2.5 : 1}
+                                  stroke="white"
+                                  strokeWidth={1}
                                   style={{ outline: "none" }}
                                 />
                               );
@@ -671,7 +705,7 @@ export default function BudgetPage() {
                           </tr>
                         </thead>
                         <tbody className="text-white">
-                          {[...legendData]
+                          {[...legendTableData]
                             .sort((a, b) => b.pct - a.pct)
                             .map((row) => (
                               <tr key={row.category} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
@@ -680,13 +714,10 @@ export default function BudgetPage() {
                                     className="inline-block w-3 h-3 rounded-sm shrink-0 mr-2 align-middle"
                                     style={{
                                       backgroundColor: CATEGORY_COLORS[row.category] ?? "#888",
-                                      outline: row.isOverBudget ? "2px solid #FF5C5C" : undefined,
-                                      outlineOffset: "-1px",
                                     }}
                                     aria-hidden
                                   />
                                   {row.category}
-                                  {row.isOverBudget && <span className="text-[11px] text-red-400 ml-1.5">over budget</span>}
                                 </td>
                                 <td className="py-1.5 text-right pr-2 tabular-nums">
                                   {row.pct.toFixed(1)}%
@@ -696,7 +727,7 @@ export default function BudgetPage() {
                         </tbody>
                       </table>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             </div>
@@ -769,6 +800,31 @@ export default function BudgetPage() {
                     </ResponsiveContainer>
                   </div>
                 )}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+                <h2 className="text-white font-semibold">Account Balances</h2>
+              </div>
+              <div className="p-4 bg-[#252525]">
+                <ul className="space-y-2 text-sm">
+                  {Object.entries(accountBalances).map(([name, balance], index) => (
+                    <li
+                      key={name}
+                      className={`flex justify-between items-baseline gap-3 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"} px-3 py-2 rounded-lg`}
+                    >
+                      <span className="text-gray-200 truncate">{name}</span>
+                      <span
+                        className={`tabular-nums shrink-0 font-medium ${
+                          balance < 0 ? "text-red-400" : "text-white"
+                        }`}
+                      >
+                        {balance < 0 ? `(${fmtDollars(Math.abs(balance))})` : fmtDollars(balance)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             </div>
           </div>
