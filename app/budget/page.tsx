@@ -219,7 +219,7 @@ const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 
 /* Base account balances (not tied to data yet except Wells Fargo Checking) */
 const BASE_ACCOUNT_BALANCES = {
-  "Wells Fargo Checking": 101.14,
+  "Wells Fargo Checking": 558.31,
   "Wells Fargo Savings": 711.13,
   "CapitalOne Credit": -18.26,
   Venmo: 102.61,
