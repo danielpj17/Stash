@@ -242,6 +242,7 @@ export default function BudgetPage() {
   const { allRows, allTransfers, loading, error } = useExpensesData();
 
   const [allBudgets, setAllBudgets] = useState<MonthlyBudgets | null>(null);
+  const [budgetError, setBudgetError] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [editBudgetValue, setEditBudgetValue] = useState("");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
@@ -454,14 +455,14 @@ export default function BudgetPage() {
           typeof body?.error === "string"
             ? body.error
             : `Save failed (${res.status}). Check Vercel logs if deployed.`;
-        setError(msg);
+        setBudgetError(msg);
         return;
       }
       setAllBudgets((body as MonthlyBudgets) ?? next);
-      setError(null);
+      setBudgetError(null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to save budget. Try again.";
-      setError(msg);
+      setBudgetError(msg);
     }
   }, [selectedCategory, selectedMonth, editBudgetValue, allBudgets]);
 
@@ -515,10 +516,10 @@ export default function BudgetPage() {
           </div>
         </div>
 
-        {error && (
+        {(budgetError || error) && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-2 text-sm">
-            {error}
-            {!error.includes("NEXT_PUBLIC") && (
+            {budgetError ?? error}
+            {!(budgetError ?? error)?.includes("NEXT_PUBLIC") && (
               <span className="block mt-1 text-gray-400">Showing empty data until the connection works.</span>
             )}
           </div>
