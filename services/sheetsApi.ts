@@ -44,7 +44,8 @@ function monthNameFromNumber(month: number): string {
   ][month - 1] ?? "";
 }
 
-function rowMatchesMonth(row: SheetRow, selectedMonth?: string): boolean {
+/** Exported for client-side filtering when using full-year cache. */
+export function rowMatchesMonth(row: SheetRow, selectedMonth?: string): boolean {
   if (!selectedMonth || selectedMonth === "full") return true;
   const monthNum = Number(selectedMonth);
   if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return true;
@@ -137,7 +138,8 @@ function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
   };
 }
 
-function transferMatchesMonth(row: TransferRow, selectedMonth?: string): boolean {
+/** Exported for client-side filtering when using full-year cache. */
+export function transferMatchesMonth(row: TransferRow, selectedMonth?: string): boolean {
   if (!selectedMonth || selectedMonth === "full") return true;
   const monthNum = Number(selectedMonth);
   if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return true;

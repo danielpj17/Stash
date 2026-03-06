@@ -6,8 +6,8 @@ import { PlusCircle, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
-import { useRefresh } from "@/contexts/RefreshContext";
-import { getExpenses } from "@/services/sheetsApi";
+import { useExpensesData } from "@/contexts/ExpensesDataContext";
+import { rowMatchesMonth } from "@/services/sheetsApi";
 import type { SheetRow } from "@/services/sheetsApi";
 import { EXPENSE_CATEGORIES, PIE_COLORS, CATEGORY_COLORS } from "@/lib/constants";
 import {
@@ -171,13 +171,15 @@ const axisStroke = "#9ca3af";
 
 export default function ExpensesPage() {
   const { selectedMonth, selectedLabel } = useMonth();
-  const { refreshKey } = useRefresh();
-  const [rows, setRows] = useState<SheetRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { allRows, loading, error } = useExpensesData();
   const [expensesTab, setExpensesTab] = useState<"expenses" | "total">("expenses");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+
+  const rows = useMemo(
+    () => allRows.filter((r) => rowMatchesMonth(r, selectedMonth)),
+    [allRows, selectedMonth]
+  );
 
   const categoryTransactions = useMemo(() => {
     if (!selectedCategory) return [];
@@ -189,25 +191,6 @@ export default function ExpensesPage() {
         return tB - tA;
       });
   }, [rows, selectedCategory]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    getExpenses(selectedMonth)
-      .then((data) => {
-        if (!cancelled) setRows(data);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedMonth, refreshKey]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

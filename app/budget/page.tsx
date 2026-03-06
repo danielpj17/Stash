@@ -7,7 +7,8 @@ import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
-import { getExpenses, getTransfers, submitTransfer } from "@/services/sheetsApi";
+import { useExpensesData } from "@/contexts/ExpensesDataContext";
+import { rowMatchesMonth, transferMatchesMonth, submitTransfer } from "@/services/sheetsApi";
 import type { SheetRow, TransferRow } from "@/services/sheetsApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
 import {
@@ -237,26 +238,30 @@ type PieSlice = { category: string; value: number; isOverBudget: boolean };
 
 export default function BudgetPage() {
   const { selectedMonth, selectedLabel } = useMonth();
-  const { refreshKey } = useRefresh();
+  const { refreshKey, triggerRefresh } = useRefresh();
+  const { allRows, allTransfers, loading, error } = useExpensesData();
 
-  const [rows, setRows] = useState<SheetRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [allBudgets, setAllBudgets] = useState<MonthlyBudgets | null>(null);
-
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [editBudgetValue, setEditBudgetValue] = useState("");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
 
   const [incomeCardMode, setIncomeCardMode] = useState<"income" | "transfers">("income");
-  const [transfers, setTransfers] = useState<TransferRow[]>([]);
-  const [transfersLoading, setTransfersLoading] = useState(false);
   const [showTransferForm, setShowTransferForm] = useState(false);
   const [tfFrom, setTfFrom] = useState("");
   const [tfAmount, setTfAmount] = useState("");
   const [tfDesc, setTfDesc] = useState("");
   const [tfStatus, setTfStatus] = useState<"idle" | "submitting" | "error">("idle");
   const [tfError, setTfError] = useState("");
+
+  const rows = useMemo(
+    () => allRows.filter((r) => rowMatchesMonth(r, selectedMonth)),
+    [allRows, selectedMonth]
+  );
+  const transfers = useMemo(
+    () => allTransfers.filter((t) => transferMatchesMonth(t, selectedMonth)),
+    [allTransfers, selectedMonth]
+  );
 
   const budgetGoals = useMemo(
     () => resolveBudgetForMonth(selectedMonth, allBudgets),
@@ -311,27 +316,6 @@ export default function BudgetPage() {
       .catch(() => { if (!cancelled) setAllBudgets({}); });
     return () => { cancelled = true; };
   }, [refreshKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    getExpenses(selectedMonth)
-      .then((data) => { if (!cancelled) setRows(data); })
-      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load"); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [selectedMonth, refreshKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setTransfersLoading(true);
-    getTransfers(selectedMonth)
-      .then((data) => { if (!cancelled) setTransfers(data); })
-      .catch(() => { if (!cancelled) setTransfers([]); })
-      .finally(() => { if (!cancelled) setTransfersLoading(false); });
-    return () => { cancelled = true; };
-  }, [selectedMonth, refreshKey]);
 
   useEffect(() => {
     if (!selectedCategory) return;
@@ -497,13 +481,12 @@ export default function BudgetPage() {
       setTfDesc("");
       setTfStatus("idle");
       setShowTransferForm(false);
-      const fresh = await getTransfers(selectedMonth);
-      setTransfers(fresh);
+      triggerRefresh();
     } catch (err) {
       setTfStatus("error");
       setTfError(err instanceof Error ? err.message : "Failed to submit transfer.");
     }
-  }, [tfFrom, tfAmount, tfDesc, selectedMonth]);
+  }, [tfFrom, tfAmount, tfDesc, triggerRefresh]);
 
   /* ---------- render ---------- */
 
@@ -731,9 +714,7 @@ export default function BudgetPage() {
                         </div>
                       </div>
                     )}
-                    {transfersLoading ? (
-                      <p className="text-gray-400 px-2 py-2">Loading transfers…</p>
-                    ) : sortedTransfers.length === 0 ? (
+                    {sortedTransfers.length === 0 ? (
                       <p className="text-gray-400 px-2 py-2">No transfers for this period.</p>
                     ) : (
                       sortedTransfers.map((row, index) => (
