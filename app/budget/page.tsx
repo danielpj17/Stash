@@ -638,9 +638,6 @@ export default function BudgetPage() {
                   </button>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-white whitespace-nowrap">
-                    Total: {fmtDollars(incomeCardMode === "income" ? incomeTotal : transfersTotal)}
-                  </span>
                   {incomeCardMode === "transfers" && (
                     <button
                       type="button"
@@ -651,6 +648,9 @@ export default function BudgetPage() {
                       <Plus className="w-5 h-5" />
                     </button>
                   )}
+                  <span className="text-sm font-semibold text-white whitespace-nowrap">
+                    Total: {fmtDollars(incomeCardMode === "income" ? incomeTotal : transfersTotal)}
+                  </span>
                 </div>
               </div>
               <div className="p-4 flex-1 min-h-0 bg-[#252525]">
