@@ -132,7 +132,7 @@ function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
     timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
     transferFrom: (raw["Transfer from"] ?? raw.transferFrom ?? "") as string,
     amount: Number(raw["Transfer Amount"] ?? raw.amount ?? 0),
-    description: (raw["Transfer Description"] ?? raw.description ?? "") as string,
+    description: (raw["Transfer Description"] ?? raw["Transfer Descriptior"] ?? raw.description ?? "") as string,
     month: (raw.Month ?? raw.month ?? "") as string,
   };
 }

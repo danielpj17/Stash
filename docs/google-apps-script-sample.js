@@ -2,16 +2,15 @@
  * Google Apps Script for the Stash Web App backend.
  *
  * Supports two tabs in the same spreadsheet:
- * - "Expense Form" — expenses/income (Timestamp, Expense Type, Amount, Description, Month)
+ * - "Expenses" — expenses/income (Timestamp, Expense Type, Amount, Description, Month)
  * - "Transfers" — transfers (Timestamp, Transfer from, Transfer Amount, Transfer Description, Month)
  *
- * When the Stash app calls this Web App by URL, there is no "active" spreadsheet,
- * so we open by SPREADSHEET_ID. Replace YOUR_SPREADSHEET_ID_HERE with the ID from your sheet URL:
- * https://docs.google.com/spreadsheets/d/THIS_PART_IS_THE_ID/edit
+ * When the Stash app calls this Web App by URL, open by SPREADSHEET_ID. Replace the ID below
+ * with the value from your sheet URL: .../d/THIS_PART_IS_THE_ID/edit
  */
 
 const SPREADSHEET_ID = "YOUR_SPREADSHEET_ID_HERE";
-const EXPENSE_SHEET_NAME = "Expense Form";
+const EXPENSE_SHEET_NAME = "Expenses";
 const TRANSFERS_SHEET_NAME = "Transfers";
 
 function getSheet(name) {
@@ -69,7 +68,7 @@ function doPost(e) {
         body.description || ""
       ]);
     } else {
-      // Expense Form: Timestamp, Expense Type, Amount, Description (Month = formula on sheet)
+      // Expenses: Timestamp, Expense Type, Amount, Description (Month = formula on sheet)
       sheet.appendRow([
         timestamp,
         body.expenseType || "",
