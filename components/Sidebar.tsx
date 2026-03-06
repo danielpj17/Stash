@@ -44,9 +44,14 @@ export default function Sidebar() {
           ${mobileOpen ? "max-lg:translate-x-0" : "max-lg:-translate-x-full"}
         `}
       >
-        {/* Top: Logo + Stash + hamburger */}
-        <div className="flex items-center justify-between gap-2 py-4 px-4 border-b border-charcoal-dark shrink-0 min-h-[4rem]">
-          <div className="flex items-center gap-3 min-w-0 flex-1">
+        {/* Top: Logo + Stash + hamburger (stacked when collapsed to avoid overlap) */}
+        <div
+          className={`
+            flex border-b border-charcoal-dark shrink-0 min-h-[4rem]
+            ${collapsed ? "flex-col items-center justify-center gap-2 py-3 px-2" : "flex-row items-center justify-between gap-2 py-4 px-4"}
+          `}
+        >
+          <div className={`flex items-center min-w-0 ${collapsed ? "justify-center" : "gap-3 flex-1"}`}>
             <span
               className="flex items-center justify-center shrink-0 text-accent overflow-visible"
               style={{ width: "1.75rem", height: "1.75rem", minWidth: "1.75rem", minHeight: "1.75rem" }}
@@ -62,7 +67,7 @@ export default function Sidebar() {
           <button
             type="button"
             onClick={toggleCollapsed}
-            className="hidden lg:block p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors"
+            className="hidden lg:flex p-2 rounded-lg text-gray-400 hover:text-[#50C878] hover:bg-charcoal transition-colors shrink-0"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             <Menu className="w-5 h-5" />
