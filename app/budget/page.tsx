@@ -2,13 +2,13 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { X, Save, PlusCircle } from "lucide-react";
+import { X, Save, PlusCircle, Loader2, Plus } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
-import { getExpenses } from "@/services/sheetsApi";
-import type { SheetRow } from "@/services/sheetsApi";
+import { getExpenses, getTransfers, submitTransfer } from "@/services/sheetsApi";
+import type { SheetRow, TransferRow } from "@/services/sheetsApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
 import {
   PieChart,
@@ -248,6 +248,16 @@ export default function BudgetPage() {
   const [editBudgetValue, setEditBudgetValue] = useState("");
   const [activePieIndex, setActivePieIndex] = useState<number | null>(null);
 
+  const [incomeCardMode, setIncomeCardMode] = useState<"income" | "transfers">("income");
+  const [transfers, setTransfers] = useState<TransferRow[]>([]);
+  const [transfersLoading, setTransfersLoading] = useState(false);
+  const [showTransferForm, setShowTransferForm] = useState(false);
+  const [tfFrom, setTfFrom] = useState("");
+  const [tfAmount, setTfAmount] = useState("");
+  const [tfDesc, setTfDesc] = useState("");
+  const [tfStatus, setTfStatus] = useState<"idle" | "submitting" | "error">("idle");
+  const [tfError, setTfError] = useState("");
+
   const budgetGoals = useMemo(
     () => resolveBudgetForMonth(selectedMonth, allBudgets),
     [selectedMonth, allBudgets]
@@ -314,6 +324,16 @@ export default function BudgetPage() {
   }, [selectedMonth, refreshKey]);
 
   useEffect(() => {
+    let cancelled = false;
+    setTransfersLoading(true);
+    getTransfers(selectedMonth)
+      .then((data) => { if (!cancelled) setTransfers(data); })
+      .catch(() => { if (!cancelled) setTransfers([]); })
+      .finally(() => { if (!cancelled) setTransfersLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedMonth, refreshKey]);
+
+  useEffect(() => {
     if (!selectedCategory) return;
     const onKeyDown = (e: KeyboardEvent) => { if (e.key === "Escape") setSelectedCategory(null); };
     window.addEventListener("keydown", onKeyDown);
@@ -335,6 +355,15 @@ export default function BudgetPage() {
       });
   }, [rows]);
   const incomeTotal = incomeTransactions.reduce((sum, r) => sum + r.amount, 0);
+
+  const sortedTransfers = useMemo(() => {
+    return [...transfers].sort((a, b) => {
+      const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return tB - tA;
+    });
+  }, [transfers]);
+  const transfersTotal = sortedTransfers.reduce((sum, r) => sum + r.amount, 0);
 
   const categoryTransactions = useMemo(() => {
     if (!selectedCategory) return [];
@@ -452,6 +481,30 @@ export default function BudgetPage() {
     }
   }, [selectedCategory, selectedMonth, editBudgetValue, allBudgets]);
 
+  const handleSubmitTransfer = useCallback(async () => {
+    const num = parseFloat(tfAmount);
+    if (!tfFrom.trim() || Number.isNaN(num) || num <= 0) {
+      setTfStatus("error");
+      setTfError("Enter a source account and a valid amount.");
+      return;
+    }
+    setTfStatus("submitting");
+    setTfError("");
+    try {
+      await submitTransfer({ transferFrom: tfFrom.trim(), amount: num, description: tfDesc.trim() });
+      setTfFrom("");
+      setTfAmount("");
+      setTfDesc("");
+      setTfStatus("idle");
+      setShowTransferForm(false);
+      const fresh = await getTransfers(selectedMonth);
+      setTransfers(fresh);
+    } catch (err) {
+      setTfStatus("error");
+      setTfError(err instanceof Error ? err.message : "Failed to submit transfer.");
+    }
+  }, [tfFrom, tfAmount, tfDesc, selectedMonth]);
+
   /* ---------- render ---------- */
 
   if (loading) {
@@ -560,32 +613,149 @@ export default function BudgetPage() {
 
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">Income</h2>
-                <span className="text-sm font-semibold text-white whitespace-nowrap">
-                  Total: {fmtDollars(incomeTotal)}
-                </span>
-              </div>
-              <div className="p-4 flex-1 min-h-0 bg-[#252525]">
-                <div className="min-h-[180px] text-sm -mx-2">
-                  {incomeTransactions.length === 0 ? (
-                    <p className="text-gray-400 px-2 py-2">No income entries for this period.</p>
-                  ) : (
-                    incomeTransactions.map((row, index) => (
-                      <div
-                        key={`${row.timestamp ?? index}-${row.amount}-${row.description}`}
-                        className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="text-gray-200">{row.description.trim() || "Income"}</span>
-                          <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
-                        </span>
-                        <span className="text-right shrink-0">
-                          {fmtDollars(row.amount)}
-                        </span>
-                      </div>
-                    ))
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setIncomeCardMode("income")}
+                    className={`px-3 py-1 rounded-md text-sm font-semibold transition-colors ${
+                      incomeCardMode === "income"
+                        ? "bg-[#252525] text-white"
+                        : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Income
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIncomeCardMode("transfers")}
+                    className={`px-3 py-1 rounded-md text-sm font-semibold transition-colors ${
+                      incomeCardMode === "transfers"
+                        ? "bg-[#252525] text-white"
+                        : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Transfers
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-white whitespace-nowrap">
+                    Total: {fmtDollars(incomeCardMode === "income" ? incomeTotal : transfersTotal)}
+                  </span>
+                  {incomeCardMode === "transfers" && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTransferForm((v) => !v)}
+                      className="p-1 rounded-md text-gray-400 hover:text-[#50C878] hover:bg-[#252525] transition-colors"
+                      aria-label="Add transfer"
+                    >
+                      <Plus className="w-5 h-5" />
+                    </button>
                   )}
                 </div>
+              </div>
+              <div className="p-4 flex-1 min-h-0 bg-[#252525]">
+                {incomeCardMode === "income" ? (
+                  <div className="min-h-[180px] text-sm -mx-2">
+                    {incomeTransactions.length === 0 ? (
+                      <p className="text-gray-400 px-2 py-2">No income entries for this period.</p>
+                    ) : (
+                      incomeTransactions.map((row, index) => (
+                        <div
+                          key={`${row.timestamp ?? index}-${row.amount}-${row.description}`}
+                          className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="text-gray-200">{row.description.trim() || "Income"}</span>
+                            <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
+                          </span>
+                          <span className="text-right shrink-0">
+                            {fmtDollars(row.amount)}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                ) : (
+                  <div className="min-h-[180px] text-sm -mx-2">
+                    {showTransferForm && (
+                      <div className="mx-2 mb-3 p-3 rounded-lg bg-[#1e1e1e] border border-charcoal-dark space-y-2">
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={tfFrom}
+                            onChange={(e) => setTfFrom(e.target.value)}
+                            placeholder="Transfer from"
+                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={tfAmount}
+                            onChange={(e) => setTfAmount(e.target.value)}
+                            placeholder="Amount"
+                            className="w-24 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          value={tfDesc}
+                          onChange={(e) => setTfDesc(e.target.value)}
+                          placeholder="Description (optional)"
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                        />
+                        {tfStatus === "error" && (
+                          <p className="text-xs text-red-400">{tfError}</p>
+                        )}
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={handleSubmitTransfer}
+                            disabled={tfStatus === "submitting"}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-dark disabled:opacity-50 transition-colors"
+                          >
+                            {tfStatus === "submitting" ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setShowTransferForm(false); setTfStatus("idle"); setTfError(""); }}
+                            className="px-3 py-1.5 rounded-lg text-gray-400 text-sm hover:text-white transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {transfersLoading ? (
+                      <p className="text-gray-400 px-2 py-2">Loading transfers…</p>
+                    ) : sortedTransfers.length === 0 ? (
+                      <p className="text-gray-400 px-2 py-2">No transfers for this period.</p>
+                    ) : (
+                      sortedTransfers.map((row, index) => (
+                        <div
+                          key={`${row.timestamp ?? index}-${row.amount}-${row.transferFrom}`}
+                          className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="text-gray-200">{row.transferFrom.trim() || "Transfer"}</span>
+                            {row.description.trim() && (
+                              <span className="text-gray-500 text-xs ml-1">— {row.description.trim()}</span>
+                            )}
+                            <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
+                          </span>
+                          <span className="text-right shrink-0">
+                            {fmtDollars(row.amount)}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>

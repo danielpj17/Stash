@@ -27,7 +27,12 @@ export async function GET(request: NextRequest) {
   }
   const { searchParams } = new URL(request.url);
   const month = searchParams.get("month");
-  const url = month ? `${BASE_URL}?month=${encodeURIComponent(month)}` : BASE_URL;
+  const sheet = searchParams.get("sheet");
+  const params = new URLSearchParams();
+  if (month) params.set("month", month);
+  if (sheet) params.set("sheet", sheet);
+  const qs = params.toString();
+  const url = qs ? `${BASE_URL}?${qs}` : BASE_URL;
   try {
     // GET: follow redirects so that if Google does an internal redirect we still get JSON
     const res = await fetch(url, { cache: "no-store", redirect: "follow" });

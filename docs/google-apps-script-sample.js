@@ -1,41 +1,45 @@
 /**
- * Google Apps Script sample for the Stash Web App backend.
+ * Google Apps Script for the Stash Web App backend.
  *
- * SETUP:
- * 1. Create a Google Sheet with headers in row 1: Timestamp | Expense Type | Amount | Description | Month
- *    (Month can be a formula, e.g. =TEXT(A2,"mmmm") or an array formula over column A; the script does not write Month.)
- * 2. Copy the Sheet ID from the URL: https://docs.google.com/spreadsheets/d/THIS_PART_IS_THE_SHEET_ID/edit
- * 3. Extensions > Apps Script, paste this code. Replace SPREADSHEET_ID below with your Sheet ID.
- * 4. Deploy > New deployment > Web app > Execute as: Me, Who has access: Anyone. Copy the /exec URL.
- * 5. Put that URL in .env.local as NEXT_PUBLIC_GOOGLE_APPS_SCRIPT_URL.
+ * Supports two tabs in the same spreadsheet:
+ * - "Expense Form" — expenses/income (Timestamp, Expense Type, Amount, Description, Month)
+ * - "Transfers" — transfers (Timestamp, Transfer from, Transfer Amount, Transfer Description, Month)
  *
- * When the Web App runs from a URL (not from the sheet), there is no "active" spreadsheet, so we must
- * open the sheet by ID. getActiveSpreadsheet() returns null and causes "Cannot read properties of null".
+ * When the Stash app calls this Web App by URL, there is no "active" spreadsheet,
+ * so we open by SPREADSHEET_ID. Replace YOUR_SPREADSHEET_ID_HERE with the ID from your sheet URL:
+ * https://docs.google.com/spreadsheets/d/THIS_PART_IS_THE_ID/edit
  */
 
-const SPREADSHEET_ID = "YOUR_SHEET_ID_HERE"; // from the sheet URL: .../d/YOUR_SHEET_ID_HERE/edit
-const SHEET_NAME = "Sheet1"; // tab name; change if you renamed it
+const SPREADSHEET_ID = "YOUR_SPREADSHEET_ID_HERE";
+const EXPENSE_SHEET_NAME = "Expense Form";
+const TRANSFERS_SHEET_NAME = "Transfers";
 
-function getSheet() {
-  return SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_NAME);
+function getSheet(name) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  return ss.getSheetByName(name);
 }
 
 function doGet(e) {
-  const sheet = getSheet();
+  const sheetName = (e && e.parameter && e.parameter.sheet) || EXPENSE_SHEET_NAME;
+  const sheet = getSheet(sheetName);
+  if (!sheet) {
+    return ContentService.createTextOutput(JSON.stringify({ error: "Sheet not found: " + sheetName }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   const data = sheet.getDataRange().getValues();
   const headers = data[0];
-  const monthParam = e?.parameter?.month;
+  const monthParam = (e && e.parameter) ? e.parameter.month : undefined;
 
-  let rows = [];
+  const rows = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    if (row.every(function (c) { return c === "" || c === null; })) continue;
+    if (row.every(c => c === "" || c === null)) continue;
     const obj = {};
-    headers.forEach(function (h, j) {
-      obj[h] = row[j];
+    headers.forEach((header, j) => {
+      obj[header] = row[j];
     });
     if (monthParam && monthParam !== "full") {
-      const rowMonth = String(obj["Month"] ?? "").trim();
+      const rowMonth = String((obj["Month"] != null ? obj["Month"] : "")).trim();
       if (rowMonth !== monthParam) continue;
     }
     rows.push(obj);
@@ -46,16 +50,38 @@ function doGet(e) {
 }
 
 function doPost(e) {
-  const sheet = getSheet();
-  const payload = JSON.parse(e.postData?.contents || "{}");
-  const timestamp = new Date();
-  const expenseType = payload.expenseType || "";
-  const amount = Number(payload.amount) || 0;
-  const description = payload.description || "";
+  try {
+    const body = JSON.parse(e.postData.contents);
+    const sheetName = body.sheet || EXPENSE_SHEET_NAME;
+    const sheet = getSheet(sheetName);
+    if (!sheet) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Sheet not found: " + sheetName }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
 
-  // Append only Timestamp, Expense Type, Amount, Description. Leave Month to the sheet formula (from timestamp).
-  sheet.appendRow([timestamp, expenseType, amount, description]);
+    const timestamp = new Date();
 
-  return ContentService.createTextOutput(JSON.stringify({ success: true }))
-    .setMimeType(ContentService.MimeType.JSON);
+    if (sheetName === TRANSFERS_SHEET_NAME) {
+      sheet.appendRow([
+        timestamp,
+        body.transferFrom || "",
+        Number(body.amount) || 0,
+        body.description || ""
+      ]);
+    } else {
+      // Expense Form: Timestamp, Expense Type, Amount, Description (Month = formula on sheet)
+      sheet.appendRow([
+        timestamp,
+        body.expenseType || "",
+        Number(body.amount) || 0,
+        body.description || ""
+      ]);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
 }

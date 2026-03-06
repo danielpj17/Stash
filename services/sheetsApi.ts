@@ -114,3 +114,87 @@ export async function submitExpense(payload: {
     throw new Error(err.error || `Failed to submit: ${res.status}`);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  Transfers (separate "Transfers" sheet tab)                         */
+/* ------------------------------------------------------------------ */
+
+export type TransferRow = {
+  timestamp?: string;
+  transferFrom: string;
+  amount: number;
+  description: string;
+  month: string;
+};
+
+function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
+  return {
+    timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
+    transferFrom: (raw["Transfer from"] ?? raw.transferFrom ?? "") as string,
+    amount: Number(raw["Transfer Amount"] ?? raw.amount ?? 0),
+    description: (raw["Transfer Description"] ?? raw.description ?? "") as string,
+    month: (raw.Month ?? raw.month ?? "") as string,
+  };
+}
+
+function transferMatchesMonth(row: TransferRow, selectedMonth?: string): boolean {
+  if (!selectedMonth || selectedMonth === "full") return true;
+  const monthNum = Number(selectedMonth);
+  if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return true;
+
+  const rawMonth = String(row.month ?? "").trim().toLowerCase();
+  if (rawMonth) {
+    const monthName = monthNameFromNumber(monthNum);
+    const normalizedNumeric = String(parseInt(rawMonth, 10));
+    if (
+      rawMonth === String(monthNum) ||
+      rawMonth === monthName ||
+      rawMonth === `${monthName} 2026` ||
+      normalizedNumeric === String(monthNum)
+    ) {
+      return true;
+    }
+  }
+
+  if (row.timestamp) {
+    const d = new Date(row.timestamp);
+    if (!Number.isNaN(d.getTime()) && d.getMonth() + 1 === monthNum) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export async function getTransfers(month?: string): Promise<TransferRow[]> {
+  const params = new URLSearchParams({ sheet: "Transfers" });
+  if (month) params.set("month", month);
+  const url = `${SHEETS_API}?${params.toString()}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Failed to fetch transfers: ${res.status}`);
+  }
+  const data = await res.json();
+  const rows: Record<string, unknown>[] = Array.isArray(data)
+    ? (data as Record<string, unknown>[])
+    : ((data.rows ?? data.data ?? []) as Record<string, unknown>[]);
+  const normalized = rows.map((r) => normalizeTransferRow(r));
+  return normalized.filter((row) => transferMatchesMonth(row, month));
+}
+
+export async function submitTransfer(payload: {
+  transferFrom: string;
+  amount: number;
+  description: string;
+}): Promise<void> {
+  const res = await fetch(SHEETS_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sheet: "Transfers", ...payload }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Failed to submit transfer: ${res.status}`);
+  }
+}
