@@ -222,6 +222,7 @@ const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 const TRANSFER_FROM_OPTIONS = [
   "WF Checking",
   "WF Savings",
+  "Venmo",
   "Fidelity",
   "Robinhood",
   "My529",
@@ -238,6 +239,7 @@ const TRANSFER_TO_OPTIONS = [...TRANSFER_FROM_OPTIONS, "Misc."] as const;
 const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   "WF Checking": "Wells Fargo Checking",
   "WF Savings": "Wells Fargo Savings",
+  Venmo: "Venmo",
   Fidelity: "Fidelity",
   Robinhood: "Robinhood",
   My529: "My529",
@@ -247,19 +249,22 @@ const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   Cash: "Cash",
 };
 
-/* Base balances; transfers (all time) and month income/expense adjust displayed values. */
+/**
+ * Implied opening balances before sheet transfers + all-time income/expense on WF Checking.
+ * Calibrated so displayed balances match your real accounts with current transfer + expense data.
+ * When you reconcile again: targets = base + transferNet + (income−expense on WF Checking only).
+ */
 const BASE_ACCOUNT_BALANCES: Record<string, number> = {
-  "Wells Fargo Checking": 558.31,
-  "Wells Fargo Savings": 711.13,
-  "CapitalOne Credit": -18.26,
-  Venmo: 102.61,
-  Fidelity: 9756.14,
-  Robinhood: 0,
+  "Wells Fargo Checking": 427.1,
+  "Wells Fargo Savings": 1061.13,
+  Venmo: 56.47,
+  Fidelity: 10597.43,
+  Robinhood: 711.39,
   My529: 0,
   "Charles Schwab": 0,
   Ally: 0,
-  Parents: 0,
-  Cash: 0,
+  Parents: 350,
+  Cash: 100,
 };
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
@@ -450,6 +455,16 @@ export default function BudgetPage() {
     [rows, selectedMonth]
   );
 
+  /** Income / expense effect on WF Checking uses full sheet data, not the selected month. */
+  const allTimeIncomeTotal = useMemo(
+    () => allRows.filter((r) => r.expenseType === "Income").reduce((s, r) => s + r.amount, 0),
+    [allRows]
+  );
+  const allTimeExpenseTotal = useMemo(
+    () => buildExpenseTotals(allRows).reduce((s, row) => s + row.total, 0),
+    [allRows]
+  );
+
   const accountBalances = useMemo(() => {
     const balances: Record<string, number> = { ...BASE_ACCOUNT_BALANCES };
     for (const t of allTransfers) {
@@ -466,11 +481,17 @@ export default function BudgetPage() {
         balances[toKey] += amt;
       }
     }
-    const checkingDelta = incomeTotal - expenseTotal;
+    const checkingDelta = allTimeIncomeTotal - allTimeExpenseTotal;
     balances["Wells Fargo Checking"] =
       (balances["Wells Fargo Checking"] ?? 0) + checkingDelta;
     return balances;
-  }, [allTransfers, incomeTotal, expenseTotal]);
+  }, [allTransfers, allTimeIncomeTotal, allTimeExpenseTotal]);
+
+  const visibleAccountBalances = useMemo(() => {
+    return Object.entries(accountBalances).filter(
+      ([, balance]) => Math.abs(balance) >= 0.005
+    );
+  }, [accountBalances]);
 
   /* ---------- actions ---------- */
 
@@ -1035,28 +1056,35 @@ export default function BudgetPage() {
               </div>
               <div className="p-3 flex-1 min-h-0 bg-[#252525]">
                 <div className="overflow-x-auto -mx-2">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-gray-400 border-b border-charcoal-dark">
-                        <th className="pb-1.5 pr-2 pl-2">Account</th>
-                        <th className="pb-1.5 text-right pr-2">Balance</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-white">
-                      {Object.entries(accountBalances).map(([name, balance]) => (
-                        <tr key={name} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
-                          <td className="py-1.5 pr-2 pl-2 text-gray-200">{name}</td>
-                          <td
-                            className={`py-1.5 text-right pr-2 tabular-nums ${
-                              balance < 0 ? "text-red-400" : ""
-                            }`}
-                          >
-                            {balance < 0 ? `(${fmtDollars(Math.abs(balance))})` : fmtDollars(balance)}
-                          </td>
+                  {visibleAccountBalances.length === 0 ? (
+                    <p className="text-gray-400 text-sm px-2 py-2">No accounts with a non-zero balance.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-gray-400 border-b border-charcoal-dark">
+                          <th className="pb-1.5 pr-2 pl-2">Account</th>
+                          <th className="pb-1.5 text-right pr-2">Balance</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="text-white">
+                        {visibleAccountBalances.map(([name, balance], index) => (
+                          <tr
+                            key={name}
+                            className={`border-b border-charcoal-dark/80 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
+                          >
+                            <td className="py-1.5 pr-2 pl-2 text-gray-200">{name}</td>
+                            <td
+                              className={`py-1.5 text-right pr-2 tabular-nums ${
+                                balance < 0 ? "text-red-400" : ""
+                              }`}
+                            >
+                              {balance < 0 ? `(${fmtDollars(Math.abs(balance))})` : fmtDollars(balance)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             </div>
