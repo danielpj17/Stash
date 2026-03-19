@@ -9,7 +9,7 @@ import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { useExpensesData } from "@/contexts/ExpensesDataContext";
 import { rowMatchesMonth, transferMatchesMonth, submitTransfer } from "@/services/sheetsApi";
-import type { SheetRow, TransferRow } from "@/services/sheetsApi";
+import type { SheetRow } from "@/services/sheetsApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
 import {
   PieChart,
@@ -218,15 +218,49 @@ const fmtDollars = (n: number) =>
   "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 
-/* Base account balances (not tied to data yet except Wells Fargo Checking) */
-const BASE_ACCOUNT_BALANCES = {
+/** Matches Google Form Q1 (Transfer From). */
+const TRANSFER_FROM_OPTIONS = [
+  "WF Checking",
+  "WF Savings",
+  "Fidelity",
+  "Robinhood",
+  "My529",
+  "Charles Schwab",
+  "Ally",
+  "Parents",
+  "Cash",
+] as const;
+
+/** Matches Google Form Q2 (Transfer To). */
+const TRANSFER_TO_OPTIONS = [...TRANSFER_FROM_OPTIONS, "Misc."] as const;
+
+/** Sheet / form labels → keys in BASE_ACCOUNT_BALANCES (Misc. omitted). */
+const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
+  "WF Checking": "Wells Fargo Checking",
+  "WF Savings": "Wells Fargo Savings",
+  Fidelity: "Fidelity",
+  Robinhood: "Robinhood",
+  My529: "My529",
+  "Charles Schwab": "Charles Schwab",
+  Ally: "Ally",
+  Parents: "Parents",
+  Cash: "Cash",
+};
+
+/* Base balances; transfers (all time) and month income/expense adjust displayed values. */
+const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   "Wells Fargo Checking": 558.31,
   "Wells Fargo Savings": 711.13,
   "CapitalOne Credit": -18.26,
   Venmo: 102.61,
   Fidelity: 9756.14,
   Robinhood: 0,
-} as const;
+  My529: 0,
+  "Charles Schwab": 0,
+  Ally: 0,
+  Parents: 0,
+  Cash: 0,
+};
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
@@ -250,8 +284,8 @@ export default function BudgetPage() {
   const [incomeCardMode, setIncomeCardMode] = useState<"income" | "transfers">("income");
   const [showTransferForm, setShowTransferForm] = useState(false);
   const [tfFrom, setTfFrom] = useState("");
+  const [tfTo, setTfTo] = useState("");
   const [tfAmount, setTfAmount] = useState("");
-  const [tfDesc, setTfDesc] = useState("");
   const [tfStatus, setTfStatus] = useState<"idle" | "submitting" | "error">("idle");
   const [tfError, setTfError] = useState("");
 
@@ -416,14 +450,27 @@ export default function BudgetPage() {
     [rows, selectedMonth]
   );
 
-  /* Wells Fargo Checking updates with income (add) and expenses (subtract) */
   const accountBalances = useMemo(() => {
+    const balances: Record<string, number> = { ...BASE_ACCOUNT_BALANCES };
+    for (const t of allTransfers) {
+      const amt = t.amount;
+      if (!Number.isFinite(amt) || amt === 0) continue;
+      const fromLabel = t.transferFrom.trim();
+      const toLabel = t.transferTo.trim();
+      const fromKey = TRANSFER_LABEL_TO_BALANCE_KEY[fromLabel];
+      const toKey = TRANSFER_LABEL_TO_BALANCE_KEY[toLabel];
+      if (fromKey !== undefined && balances[fromKey] !== undefined) {
+        balances[fromKey] -= amt;
+      }
+      if (toLabel !== "Misc." && toKey !== undefined && balances[toKey] !== undefined) {
+        balances[toKey] += amt;
+      }
+    }
     const checkingDelta = incomeTotal - expenseTotal;
-    return {
-      ...BASE_ACCOUNT_BALANCES,
-      "Wells Fargo Checking": BASE_ACCOUNT_BALANCES["Wells Fargo Checking"] + checkingDelta,
-    };
-  }, [incomeTotal, expenseTotal]);
+    balances["Wells Fargo Checking"] =
+      (balances["Wells Fargo Checking"] ?? 0) + checkingDelta;
+    return balances;
+  }, [allTransfers, incomeTotal, expenseTotal]);
 
   /* ---------- actions ---------- */
 
@@ -467,19 +514,23 @@ export default function BudgetPage() {
   }, [selectedCategory, selectedMonth, editBudgetValue, allBudgets]);
 
   const handleSubmitTransfer = useCallback(async () => {
-    const num = parseFloat(tfAmount);
-    if (!tfFrom.trim() || Number.isNaN(num) || num <= 0) {
+    const num = parseFloat(tfAmount.replace(/,/g, ""));
+    if (!tfFrom.trim() || !tfTo.trim() || Number.isNaN(num) || num <= 0) {
       setTfStatus("error");
-      setTfError("Enter a source account and a valid amount.");
+      setTfError("Choose from and to accounts and enter a valid amount.");
       return;
     }
     setTfStatus("submitting");
     setTfError("");
     try {
-      await submitTransfer({ transferFrom: tfFrom.trim(), amount: num, description: tfDesc.trim() });
+      await submitTransfer({
+        transferFrom: tfFrom.trim(),
+        transferTo: tfTo.trim(),
+        amount: num,
+      });
       setTfFrom("");
+      setTfTo("");
       setTfAmount("");
-      setTfDesc("");
       setTfStatus("idle");
       setShowTransferForm(false);
       triggerRefresh();
@@ -487,7 +538,7 @@ export default function BudgetPage() {
       setTfStatus("error");
       setTfError(err instanceof Error ? err.message : "Failed to submit transfer.");
     }
-  }, [tfFrom, tfAmount, tfDesc, triggerRefresh]);
+  }, [tfFrom, tfTo, tfAmount, triggerRefresh]);
 
   /* ---------- render ---------- */
 
@@ -663,31 +714,43 @@ export default function BudgetPage() {
                   <div className="min-h-[180px] text-sm -mx-2">
                     {showTransferForm && (
                       <div className="mx-2 mb-3 p-3 rounded-lg bg-[#1e1e1e] border border-charcoal-dark space-y-2">
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <select
                             value={tfFrom}
                             onChange={(e) => setTfFrom(e.target.value)}
-                            placeholder="Transfer from"
                             className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-                          />
+                            aria-label="Transfer from"
+                          >
+                            <option value="">From…</option>
+                            {TRANSFER_FROM_OPTIONS.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={tfTo}
+                            onChange={(e) => setTfTo(e.target.value)}
+                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                            aria-label="Transfer to"
+                          >
+                            <option value="">To…</option>
+                            {TRANSFER_TO_OPTIONS.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
                           <input
-                            type="number"
-                            step="0.01"
-                            min="0"
+                            type="text"
+                            inputMode="decimal"
+                            autoComplete="off"
                             value={tfAmount}
                             onChange={(e) => setTfAmount(e.target.value)}
                             placeholder="Amount"
-                            className="w-24 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                            className="w-full sm:w-28 shrink-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none tabular-nums"
                           />
                         </div>
-                        <input
-                          type="text"
-                          value={tfDesc}
-                          onChange={(e) => setTfDesc(e.target.value)}
-                          placeholder="Description (optional)"
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-                        />
                         {tfStatus === "error" && (
                           <p className="text-xs text-red-400">{tfError}</p>
                         )}
@@ -707,7 +770,14 @@ export default function BudgetPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => { setShowTransferForm(false); setTfStatus("idle"); setTfError(""); }}
+                            onClick={() => {
+                              setShowTransferForm(false);
+                              setTfStatus("idle");
+                              setTfError("");
+                              setTfFrom("");
+                              setTfTo("");
+                              setTfAmount("");
+                            }}
                             className="px-3 py-1.5 rounded-lg text-gray-400 text-sm hover:text-white transition-colors"
                           >
                             Cancel
@@ -718,23 +788,27 @@ export default function BudgetPage() {
                     {sortedTransfers.length === 0 ? (
                       <p className="text-gray-400 px-2 py-2">No transfers for this period.</p>
                     ) : (
-                      sortedTransfers.map((row, index) => (
+                      sortedTransfers.map((row, index) => {
+                        const from = row.transferFrom.trim() || "—";
+                        const to = row.transferTo.trim();
+                        const legacy = row.description?.trim();
+                        return (
                         <div
-                          key={`${row.timestamp ?? index}-${row.amount}-${row.transferFrom}`}
+                          key={`${row.timestamp ?? index}-${row.amount}-${from}-${to || legacy || ""}`}
                           className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                         >
                           <span className="min-w-0 flex-1">
-                            <span className="text-gray-200">{row.transferFrom.trim() || "Transfer"}</span>
-                            {row.description.trim() && (
-                              <span className="text-gray-500 text-xs ml-1">— {row.description.trim()}</span>
-                            )}
+                            <span className="text-gray-200">
+                              {to ? `${from} → ${to}` : legacy ? `${from} — ${legacy}` : from}
+                            </span>
                             <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
                           </span>
                           <span className="text-right shrink-0">
                             {fmtDollars(row.amount)}
                           </span>
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 )}

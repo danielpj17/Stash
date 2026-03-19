@@ -123,17 +123,26 @@ export async function submitExpense(payload: {
 export type TransferRow = {
   timestamp?: string;
   transferFrom: string;
+  transferTo: string;
   amount: number;
-  description: string;
+  /** Legacy rows only (old sheet had a description column instead of Transfer To). */
+  description?: string;
   month: string;
 };
 
 function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
+  const transferTo =
+    (raw["Transfer To"] ?? raw.transferTo ?? "") as string;
   return {
     timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
     transferFrom: (raw["Transfer from"] ?? raw.transferFrom ?? "") as string,
+    transferTo,
     amount: Number(raw["Transfer Amount"] ?? raw.amount ?? 0),
-    description: (raw["Transfer Description"] ?? raw["Transfer Descriptior"] ?? raw.description ?? "") as string,
+    description: (() => {
+      const d = raw["Transfer Description"] ?? raw["Transfer Descriptior"] ?? raw.description;
+      const s = typeof d === "string" ? d.trim() : "";
+      return s || undefined;
+    })(),
     month: (raw.Month ?? raw.month ?? "") as string,
   };
 }
@@ -187,8 +196,8 @@ export async function getTransfers(month?: string): Promise<TransferRow[]> {
 
 export async function submitTransfer(payload: {
   transferFrom: string;
+  transferTo: string;
   amount: number;
-  description: string;
 }): Promise<void> {
   const res = await fetch(SHEETS_API, {
     method: "POST",

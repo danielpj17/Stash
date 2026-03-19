@@ -3,7 +3,7 @@
  *
  * Supports two tabs in the same spreadsheet:
  * - "Expenses" — expenses/income (Timestamp, Expense Type, Amount, Description, Month)
- * - "Transfers" — transfers (Timestamp, Transfer from, Transfer Amount, Transfer Description, Month)
+ * - "Transfers" — transfers (Timestamp, Transfer from, Transfer To, Transfer Amount, Month via sheet formula)
  *
  * When the Stash app calls this Web App by URL, open by SPREADSHEET_ID. Replace the ID below
  * with the value from your sheet URL: .../d/THIS_PART_IS_THE_ID/edit
@@ -64,8 +64,8 @@ function doPost(e) {
       sheet.appendRow([
         timestamp,
         body.transferFrom || "",
+        body.transferTo || "",
         Number(body.amount) || 0,
-        body.description || ""
       ]);
     } else {
       // Expenses: Timestamp, Expense Type, Amount, Description (Month = formula on sheet)
