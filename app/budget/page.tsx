@@ -233,9 +233,19 @@ const TRANSFER_FROM_OPTIONS = [
 ] as const;
 
 /** Matches Google Form Q2 (Transfer To). */
-const TRANSFER_TO_OPTIONS = [...TRANSFER_FROM_OPTIONS, "Misc."] as const;
+const TRANSFER_TO_OPTIONS = [
+  "WF Checking",
+  "WF Savings",
+  "Venmo",
+  "Fidelity",
+  "Robinhood",
+  "My529",
+  "Charles Schwab",
+  "Ally",
+  "Misc.",
+] as const;
 
-/** Sheet / form labels → keys in BASE_ACCOUNT_BALANCES (Misc. omitted). */
+/** Sheet / form labels → keys in BASE_ACCOUNT_BALANCES (non-account inflow sources omitted). */
 const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   "WF Checking": "Wells Fargo Checking",
   "WF Savings": "Wells Fargo Savings",
@@ -245,8 +255,6 @@ const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   My529: "My529",
   "Charles Schwab": "Charles Schwab",
   Ally: "Ally",
-  Parents: "Parents",
-  Cash: "Cash",
 };
 
 /**
@@ -263,8 +271,6 @@ const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   My529: 0,
   "Charles Schwab": 0,
   Ally: 0,
-  Parents: 350,
-  Cash: 100,
 };
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
