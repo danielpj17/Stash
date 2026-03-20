@@ -817,7 +817,7 @@ export default function BudgetPage() {
                     ) : (
                       sortedTransfers.map((row, index) => {
                         const from = row.transferFrom.trim() || "—";
-                        const to = row.transferTo.trim();
+                        const to = row.transferTo.trim() || "—";
                         const legacy = row.description?.trim();
                         return (
                         <div
@@ -825,9 +825,14 @@ export default function BudgetPage() {
                           className={`flex justify-between items-baseline gap-3 text-white px-2 py-1.5 ${index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"}`}
                         >
                           <span className="min-w-0 flex-1">
-                            <span className="text-gray-200">
-                              {to ? `${from} → ${to}` : legacy ? `${from} — ${legacy}` : from}
+                            <span className="text-gray-200 inline-flex items-center gap-1.5">
+                              <span>{from}</span>
+                              <span className="text-gray-500">→</span>
+                              <span>{to}</span>
                             </span>
+                            {legacy && (
+                              <span className="text-gray-500 text-xs ml-2">({legacy})</span>
+                            )}
                             <span className="text-gray-500 text-xs ml-2 shrink-0">{formatDateMMDDYY(row.timestamp)}</span>
                           </span>
                           <span className="text-right shrink-0">
