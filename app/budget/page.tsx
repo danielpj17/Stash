@@ -10,9 +10,10 @@ import { useRefresh } from "@/contexts/RefreshContext";
 import { useExpensesData } from "@/contexts/ExpensesDataContext";
 import { rowMatchesMonth, transferMatchesMonth, submitTransfer } from "@/services/sheetsApi";
 import type { SheetRow } from "@/services/sheetsApi";
-import { refreshSnaptradeBalances } from "@/services/snaptradeApi";
-import type { SupportedBroker } from "@/services/snaptradeApi";
+import { getLatestSnaptradeBalances, refreshSnaptradeBalances } from "@/services/snaptradeApi";
+import type { SupportedBroker, RefreshSnaptradeBalancesResponse } from "@/services/snaptradeApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
+import { computeAccountBalances } from "@/services/accountBalancesService";
 import {
   PieChart,
   Pie,
@@ -233,7 +234,6 @@ const fmtDollars = (n: number) =>
   "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 
-/** Matches Google Form Q1 (Transfer From). */
 const TRANSFER_FROM_OPTIONS = [
   "WF Checking",
   "WF Savings",
@@ -247,7 +247,6 @@ const TRANSFER_FROM_OPTIONS = [
   "Cash",
 ] as const;
 
-/** Matches Google Form Q2 (Transfer To). */
 const TRANSFER_TO_OPTIONS = [
   "WF Checking",
   "WF Savings",
@@ -260,34 +259,6 @@ const TRANSFER_TO_OPTIONS = [
   "Misc.",
 ] as const;
 
-/** Sheet / form labels → keys in BASE_ACCOUNT_BALANCES (non-account inflow sources omitted). */
-const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
-  "WF Checking": "Wells Fargo Checking",
-  "WF Savings": "Wells Fargo Savings",
-  Venmo: "Venmo",
-  Fidelity: "Fidelity",
-  Robinhood: "Robinhood",
-  My529: "My529",
-  "Charles Schwab": "Charles Schwab",
-  Ally: "Ally",
-};
-
-/**
- * Implied opening balances before sheet transfers + all-time income/expense on WF Checking.
- * Calibrated so displayed balances match your real accounts with current transfer + expense data.
- * When you reconcile again: targets = base + transferNet + (income−expense on WF Checking only).
- */
-const BASE_ACCOUNT_BALANCES: Record<string, number> = {
-  "Wells Fargo Checking": 427.1,
-  "Wells Fargo Savings": 1061.13,
-  Venmo: 56.47,
-  Fidelity: 10597.43,
-  Robinhood: 711.39,
-  My529: 0,
-  "Charles Schwab": 0,
-  Ally: 0,
-};
-const LIVE_BROKER_ACCOUNT_KEYS: SupportedBroker[] = ["Fidelity", "Robinhood", "Charles Schwab"];
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
@@ -381,6 +352,22 @@ export default function BudgetPage() {
       })
       .catch(() => { if (!cancelled) setAllBudgets({}); });
     return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLatestSnaptradeBalances()
+      .then((data: RefreshSnaptradeBalancesResponse) => {
+        if (cancelled) return;
+        setLiveBrokerBalances(data.balances);
+        setBalancesFetchedAt(data.fetchedAt);
+      })
+      .catch(() => {
+        /* keep last local values */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [refreshKey]);
 
   useEffect(() => {
@@ -481,48 +468,9 @@ export default function BudgetPage() {
     [rows, selectedMonth]
   );
 
-  /** Income / expense effect on WF Checking uses full sheet data, not the selected month. */
-  const allTimeIncomeTotal = useMemo(
-    () => allRows.filter((r) => r.expenseType === "Income").reduce((s, r) => s + r.amount, 0),
-    [allRows]
-  );
-  const allTimeExpenseTotal = useMemo(
-    () => buildExpenseTotals(allRows).reduce((s, row) => s + row.total, 0),
-    [allRows]
-  );
-
-  const computedAccountBalances = useMemo(() => {
-    const balances: Record<string, number> = { ...BASE_ACCOUNT_BALANCES };
-    for (const t of allTransfers) {
-      const amt = t.amount;
-      if (!Number.isFinite(amt) || amt === 0) continue;
-      const fromLabel = t.transferFrom.trim();
-      const toLabel = t.transferTo.trim();
-      const fromKey = TRANSFER_LABEL_TO_BALANCE_KEY[fromLabel];
-      const toKey = TRANSFER_LABEL_TO_BALANCE_KEY[toLabel];
-      if (fromKey !== undefined && balances[fromKey] !== undefined) {
-        balances[fromKey] -= amt;
-      }
-      if (toLabel !== "Misc." && toKey !== undefined && balances[toKey] !== undefined) {
-        balances[toKey] += amt;
-      }
-    }
-    const checkingDelta = allTimeIncomeTotal - allTimeExpenseTotal;
-    balances["Wells Fargo Checking"] =
-      (balances["Wells Fargo Checking"] ?? 0) + checkingDelta;
-    return balances;
-  }, [allTransfers, allTimeIncomeTotal, allTimeExpenseTotal]);
-
   const accountBalances = useMemo(() => {
-    const merged = { ...computedAccountBalances };
-    for (const key of LIVE_BROKER_ACCOUNT_KEYS) {
-      const liveValue = liveBrokerBalances[key];
-      if (typeof liveValue === "number" && Number.isFinite(liveValue)) {
-        merged[key] = liveValue;
-      }
-    }
-    return merged;
-  }, [computedAccountBalances, liveBrokerBalances]);
+    return computeAccountBalances(allRows, allTransfers, liveBrokerBalances);
+  }, [allRows, allTransfers, liveBrokerBalances]);
 
   const visibleAccountBalances = useMemo(() => {
     return Object.entries(accountBalances).filter(
@@ -605,6 +553,7 @@ export default function BudgetPage() {
       const data = await refreshSnaptradeBalances();
       setLiveBrokerBalances(data.balances);
       setBalancesFetchedAt(data.fetchedAt);
+      triggerRefresh();
       setBalancesRefreshStatus("idle");
     } catch (err) {
       setBalancesRefreshStatus("error");
@@ -612,7 +561,7 @@ export default function BudgetPage() {
         err instanceof Error ? err.message : "Failed to refresh account balances."
       );
     }
-  }, []);
+  }, [triggerRefresh]);
 
   /* ---------- render ---------- */
 

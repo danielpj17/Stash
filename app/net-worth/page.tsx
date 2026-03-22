@@ -15,6 +15,7 @@ import {
   refreshSnaptradeBalances,
   type RefreshSnaptradeBalancesResponse,
 } from "@/services/snaptradeApi";
+import { computeAccountBalances } from "@/services/accountBalancesService";
 import {
   ASSET_CATEGORIES,
   LIABILITY_CATEGORIES,
@@ -149,7 +150,7 @@ async function fetchManualItems(url: string): Promise<ManualItem[]> {
 export default function NetWorthPage() {
   const { selectedMonth } = useMonth();
   const { triggerRefresh } = useRefresh();
-  const { allRows, loading: expensesLoading, error: expensesError } = useExpensesData();
+  const { allRows, allTransfers, loading: expensesLoading, error: expensesError } = useExpensesData();
 
   const [summary, setSummary] = useState<NetWorthSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -282,6 +283,23 @@ export default function NetWorthPage() {
     }
     return [...next, fidelityLatestPoint].sort((a, b) => a.month.localeCompare(b.month));
   }, [trendData, fidelityLatestPoint]);
+
+  const accountBalances = useMemo(
+    () => computeAccountBalances(allRows, allTransfers, latestBrokerBalances),
+    [allRows, allTransfers, latestBrokerBalances]
+  );
+  const visibleAccountBalances = useMemo(
+    () => Object.entries(accountBalances).filter(([, value]) => Math.abs(Number(value)) >= 0.005),
+    [accountBalances]
+  );
+  const allAccountBalancesTotal = useMemo(
+    () => Object.values(accountBalances).reduce((sum, value) => sum + Number(value || 0), 0),
+    [accountBalances]
+  );
+  const latestBrokerBalancesTotal = useMemo(
+    () => Object.values(latestBrokerBalances).reduce((sum, value) => sum + Number(value || 0), 0),
+    [latestBrokerBalances]
+  );
 
   const averageMonthlyExpenses = useMemo(() => {
     if (trendDataWithLatest.length === 0) return 0;
@@ -438,18 +456,30 @@ export default function NetWorthPage() {
     loadLatestBrokerBalances();
   }, [loadFidelityHistory, loadInvestments, loadLatestBrokerBalances]);
 
+  const adjustedLiquidNetWorth = useMemo(() => {
+    if (!summary) return 0;
+    const delta = allAccountBalancesTotal - latestBrokerBalancesTotal;
+    return summary.liquidNetWorth + delta;
+  }, [summary, allAccountBalancesTotal, latestBrokerBalancesTotal]);
+
+  const adjustedTotalNetWorth = useMemo(() => {
+    if (!summary) return 0;
+    const delta = allAccountBalancesTotal - latestBrokerBalancesTotal;
+    return summary.totalNetWorth + delta;
+  }, [summary, allAccountBalancesTotal, latestBrokerBalancesTotal]);
+
   const liquidityRatio = useMemo(() => {
     if (!summary) return 0;
-    const liabilitiesTotal = liabilities.reduce((sum, row) => sum + Number(row.value || 0), 0);
-    const liquidAssets = summary.liquidNetWorth + liabilitiesTotal;
+    const liabilitiesTotal = latestBrokerBalancesTotal - summary.liquidNetWorth;
+    const liquidAssets = adjustedLiquidNetWorth + liabilitiesTotal;
     if (averageMonthlyExpenses <= 0) return 0;
     return liquidAssets / averageMonthlyExpenses;
-  }, [summary, liabilities, averageMonthlyExpenses]);
+  }, [summary, latestBrokerBalancesTotal, adjustedLiquidNetWorth, averageMonthlyExpenses]);
 
   const runwayMonths = useMemo(() => {
     if (!summary || summary.spending <= 0) return 0;
-    return summary.liquidNetWorth / summary.spending;
-  }, [summary]);
+    return adjustedLiquidNetWorth / summary.spending;
+  }, [summary, adjustedLiquidNetWorth]);
 
   const savingsRate = useMemo(() => {
     if (!summary || summary.earning <= 0) return 0;
@@ -458,8 +488,8 @@ export default function NetWorthPage() {
 
   const goalProgress = useMemo(() => {
     if (!summary || goalTarget <= 0) return 0;
-    return Math.max(0, (summary.totalNetWorth / goalTarget) * 100);
-  }, [summary, goalTarget]);
+    return Math.max(0, (adjustedTotalNetWorth / goalTarget) * 100);
+  }, [summary, adjustedTotalNetWorth, goalTarget]);
 
   const startEdit = (item: ManualItem, kind: "assets" | "liabilities") => {
     const next: EditingState = {
@@ -545,13 +575,13 @@ export default function NetWorthPage() {
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <p className="text-sm text-gray-400">Total Net Worth</p>
             <p className="text-2xl font-semibold text-white mt-2">
-              {summaryLoading || !summary ? "Loading..." : fmtCurrency(summary.totalNetWorth)}
+              {summaryLoading || !summary ? "Loading..." : fmtCurrency(adjustedTotalNetWorth)}
             </p>
           </div>
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <p className="text-sm text-gray-400">Liquid Net Worth</p>
             <p className="text-2xl font-semibold text-white mt-2">
-              {summaryLoading || !summary ? "Loading..." : fmtCurrency(summary.liquidNetWorth)}
+              {summaryLoading || !summary ? "Loading..." : fmtCurrency(adjustedLiquidNetWorth)}
             </p>
           </div>
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
@@ -799,7 +829,7 @@ export default function NetWorthPage() {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <p className="text-sm text-gray-400">Liquidity Ratio</p>
             <p className="text-xl font-semibold text-white mt-2">{liquidityRatio.toFixed(2)}x</p>
@@ -830,10 +860,10 @@ export default function NetWorthPage() {
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <p className="text-sm text-gray-400">Connected Account Balances</p>
             <div className="mt-2 space-y-1 text-sm">
-              {Object.entries(latestBrokerBalances).length === 0 ? (
+              {visibleAccountBalances.length === 0 ? (
                 <p className="text-gray-500">No linked balances yet.</p>
               ) : (
-                Object.entries(latestBrokerBalances)
+                visibleAccountBalances
                   .sort(([a], [b]) => a.localeCompare(b))
                   .map(([name, value]) => (
                     <p key={name} className="text-gray-300">
