@@ -39,6 +39,8 @@ type ManualItem = {
   name: string;
   value: number;
   category: string;
+  acquisition_date?: string | null;
+  details?: Record<string, unknown>;
   updated_at?: string;
 };
 
@@ -47,6 +49,15 @@ type EditingState = {
   name: string;
   value: string;
   category: string;
+};
+
+type ManualFormState = {
+  id?: string;
+  name: string;
+  value: string;
+  category: string;
+  acquisitionDate: string;
+  details: Record<string, string>;
 };
 
 type GrowthPoint = {
@@ -142,6 +153,16 @@ async function fetchManualItems(url: string): Promise<ManualItem[]> {
         name: String(item.name ?? ""),
         value: Number(item.value ?? 0),
         category: String(item.category ?? ""),
+        acquisition_date:
+          typeof item.acquisition_date === "string"
+            ? item.acquisition_date
+            : typeof (item as { acquisitionDate?: unknown }).acquisitionDate === "string"
+              ? String((item as { acquisitionDate?: unknown }).acquisitionDate)
+              : null,
+        details:
+          item.details && typeof item.details === "object" && !Array.isArray(item.details)
+            ? (item.details as Record<string, unknown>)
+            : {},
         updated_at: item.updated_at ? String(item.updated_at) : undefined,
       }))
     : [];
@@ -162,8 +183,16 @@ export default function NetWorthPage() {
   const [tableLoading, setTableLoading] = useState(true);
 
   const [activeManualTab, setActiveManualTab] = useState<"assets" | "liabilities">("assets");
-  const [assetEdit, setAssetEdit] = useState<EditingState | null>(null);
-  const [liabilityEdit, setLiabilityEdit] = useState<EditingState | null>(null);
+  const [manualModalOpen, setManualModalOpen] = useState(false);
+  const [manualFormMode, setManualFormMode] = useState<"create" | "edit">("create");
+  const [manualFormTab, setManualFormTab] = useState<"assets" | "liabilities">("assets");
+  const [manualForm, setManualForm] = useState<ManualFormState>({
+    name: "",
+    value: "",
+    category: ASSET_CATEGORIES[0],
+    acquisitionDate: "",
+    details: {},
+  });
   const [savingRow, setSavingRow] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -491,61 +520,102 @@ export default function NetWorthPage() {
     return Math.max(0, (adjustedTotalNetWorth / goalTarget) * 100);
   }, [summary, adjustedTotalNetWorth, goalTarget]);
 
-  const startEdit = (item: ManualItem, kind: "assets" | "liabilities") => {
-    const next: EditingState = {
+  const resetManualForm = useCallback((tab: "assets" | "liabilities") => {
+    setManualForm({
+      name: "",
+      value: "",
+      category: tab === "assets" ? ASSET_CATEGORIES[0] : LIABILITY_CATEGORIES[0],
+      acquisitionDate: "",
+      details: {},
+    });
+  }, []);
+
+  const openCreateModal = (tab: "assets" | "liabilities") => {
+    setManualFormMode("create");
+    setManualFormTab(tab);
+    resetManualForm(tab);
+    setManualModalOpen(true);
+  };
+
+  const openEditModal = (item: ManualItem, tab: "assets" | "liabilities") => {
+    setManualFormMode("edit");
+    setManualFormTab(tab);
+    const details = item.details && typeof item.details === "object" ? item.details : {};
+    const detailStrings: Record<string, string> = {};
+    Object.entries(details).forEach(([key, value]) => {
+      detailStrings[key] = value == null ? "" : String(value);
+    });
+    setManualForm({
       id: item.id,
       name: item.name,
       value: String(item.value),
       category: item.category,
-    };
-    if (kind === "assets") setAssetEdit(next);
-    else setLiabilityEdit(next);
+      acquisitionDate: item.acquisition_date ?? "",
+      details: detailStrings,
+    });
+    setManualModalOpen(true);
   };
 
-  const cancelEdit = (kind: "assets" | "liabilities") => {
-    if (kind === "assets") setAssetEdit(null);
-    else setLiabilityEdit(null);
+  const setDetailField = (key: string, value: string) => {
+    setManualForm((prev) => ({
+      ...prev,
+      details: {
+        ...prev.details,
+        [key]: value,
+      },
+    }));
   };
 
-  const saveRow = async (kind: "assets" | "liabilities") => {
-    const edit = kind === "assets" ? assetEdit : liabilityEdit;
-    if (!edit) return;
-    const parsedValue = Number(edit.value);
-    if (!edit.name.trim() || !edit.category.trim() || !Number.isFinite(parsedValue)) {
+  const saveManualForm = async () => {
+    const parsedValue = Number(manualForm.value);
+    if (!manualForm.name.trim() || !manualForm.category.trim() || !Number.isFinite(parsedValue)) {
       setTableError("Please provide valid name, category, and numeric value.");
       return;
     }
-
-    setSavingRow(`${kind}:${edit.id}`);
+    const apiPath = manualFormTab === "assets" ? "/api/assets" : "/api/liabilities";
+    setSavingRow(`${manualFormTab}:${manualForm.id ?? "new"}`);
     setTableError(null);
     try {
-      const res = await fetch(kind === "assets" ? "/api/assets" : "/api/liabilities", {
+      const details: Record<string, unknown> = {};
+      Object.entries(manualForm.details).forEach(([key, value]) => {
+        const trimmed = String(value ?? "").trim();
+        if (trimmed.length > 0) details[key] = trimmed;
+      });
+      const res = await fetch(apiPath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: edit.id,
-          name: edit.name.trim(),
+          id: manualForm.id,
+          name: manualForm.name.trim(),
           value: parsedValue,
-          category: edit.category.trim(),
+          category: manualForm.category.trim(),
+          acquisitionDate: manualForm.acquisitionDate.trim() || null,
+          details,
         }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(err.error || `Failed to save ${kind}`);
+        throw new Error(err.error || `Failed to save ${manualFormTab}`);
       }
-      cancelEdit(kind);
+      setManualModalOpen(false);
       await Promise.all([loadManualTables(), loadSummary()]);
     } catch (err) {
-      setTableError(err instanceof Error ? err.message : `Failed to save ${kind}`);
+      setTableError(err instanceof Error ? err.message : `Failed to save ${manualFormTab}`);
     } finally {
       setSavingRow(null);
     }
   };
 
   const activeRows = activeManualTab === "assets" ? assets : liabilities;
-  const activeEdit = activeManualTab === "assets" ? assetEdit : liabilityEdit;
-  const activeCategories =
-    activeManualTab === "assets" ? ASSET_CATEGORIES : LIABILITY_CATEGORIES;
+  const activeCategories = activeManualTab === "assets" ? ASSET_CATEGORIES : LIABILITY_CATEGORIES;
+  const isAssetForm = manualFormTab === "assets";
+  const categoryLower = manualForm.category.trim().toLowerCase();
+  const isVehicleAsset = isAssetForm && categoryLower === "vehicle";
+  const isRealEstateAsset = isAssetForm && categoryLower === "real estate";
+  const isPersonalAsset = isAssetForm && categoryLower === "personal";
+  const isCreditCardLiability = !isAssetForm && categoryLower === "credit card";
+  const isLoanLiability = !isAssetForm && categoryLower === "loan";
+  const isMortgageLiability = !isAssetForm && categoryLower === "mortgage";
 
   return (
     <DashboardLayout>
@@ -595,27 +665,38 @@ export default function NetWorthPage() {
         <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
           <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
             <h2 className="text-white font-semibold">Manual Assets & Liabilities</h2>
-            <div className="inline-flex rounded-lg border border-charcoal-dark overflow-hidden">
+            <div className="inline-flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setActiveManualTab("assets")}
-                className={`px-3 py-1.5 text-sm ${
-                  activeManualTab === "assets" ? "bg-[#50C878] text-black" : "text-gray-300 bg-[#2b2b2b]"
-                }`}
+                onClick={() => openCreateModal(activeManualTab)}
+                className="px-2.5 py-1 rounded-md bg-[#252525] border border-charcoal-dark text-white hover:bg-[#2f2f2f]"
+                aria-label={`Add ${activeManualTab === "assets" ? "asset" : "liability"}`}
+                title={`Add ${activeManualTab === "assets" ? "asset" : "liability"}`}
               >
-                Assets
+                +
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveManualTab("liabilities")}
-                className={`px-3 py-1.5 text-sm ${
-                  activeManualTab === "liabilities"
-                    ? "bg-[#FF5C5C] text-black"
-                    : "text-gray-300 bg-[#2b2b2b]"
-                }`}
-              >
-                Liabilities
-              </button>
+              <div className="inline-flex rounded-lg border border-charcoal-dark overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setActiveManualTab("assets")}
+                  className={`px-3 py-1.5 text-sm ${
+                    activeManualTab === "assets" ? "bg-[#50C878] text-black" : "text-gray-300 bg-[#2b2b2b]"
+                  }`}
+                >
+                  Assets
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveManualTab("liabilities")}
+                  className={`px-3 py-1.5 text-sm ${
+                    activeManualTab === "liabilities"
+                      ? "bg-[#FF5C5C] text-black"
+                      : "text-gray-300 bg-[#2b2b2b]"
+                  }`}
+                >
+                  Liabilities
+                </button>
+              </div>
             </div>
           </div>
           <div className="p-4 overflow-x-auto">
@@ -627,105 +708,27 @@ export default function NetWorthPage() {
                   <tr className="text-left text-gray-400 border-b border-charcoal-dark">
                     <th className="py-2 pr-2">Name</th>
                     <th className="py-2 pr-2">Category</th>
+                    <th className="py-2 pr-2">Acquired</th>
                     <th className="py-2 pr-2 text-right">Value</th>
                     <th className="py-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="text-white">
                   {activeRows.map((row) => {
-                    const rowKey = `${activeManualTab}:${row.id}`;
-                    const isEditing = activeEdit?.id === row.id;
                     return (
                       <tr key={row.id} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
-                        <td className="py-2 pr-2">
-                          {isEditing ? (
-                            <input
-                              value={activeEdit.name}
-                              onChange={(e) =>
-                                activeManualTab === "assets"
-                                  ? setAssetEdit((prev) => (prev ? { ...prev, name: e.target.value } : prev))
-                                  : setLiabilityEdit((prev) =>
-                                      prev ? { ...prev, name: e.target.value } : prev
-                                    )
-                              }
-                              className="w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1"
-                            />
-                          ) : (
-                            row.name
-                          )}
-                        </td>
-                        <td className="py-2 pr-2">
-                          {isEditing ? (
-                            <select
-                              value={activeEdit.category}
-                              onChange={(e) =>
-                                activeManualTab === "assets"
-                                  ? setAssetEdit((prev) =>
-                                      prev ? { ...prev, category: e.target.value } : prev
-                                    )
-                                  : setLiabilityEdit((prev) =>
-                                      prev ? { ...prev, category: e.target.value } : prev
-                                    )
-                              }
-                              className="w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1"
-                            >
-                              {activeCategories.map((cat) => (
-                                <option key={cat} value={cat}>
-                                  {cat}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            row.category
-                          )}
-                        </td>
-                        <td className="py-2 pr-2 text-right">
-                          {isEditing ? (
-                            <input
-                              value={activeEdit.value}
-                              onChange={(e) =>
-                                activeManualTab === "assets"
-                                  ? setAssetEdit((prev) =>
-                                      prev ? { ...prev, value: e.target.value } : prev
-                                    )
-                                  : setLiabilityEdit((prev) =>
-                                      prev ? { ...prev, value: e.target.value } : prev
-                                    )
-                              }
-                              className="w-32 rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-right"
-                            />
-                          ) : (
-                            fmtCurrency(Number(row.value || 0))
-                          )}
-                        </td>
+                        <td className="py-2 pr-2">{row.name}</td>
+                        <td className="py-2 pr-2">{row.category}</td>
+                        <td className="py-2 pr-2">{row.acquisition_date || "—"}</td>
+                        <td className="py-2 pr-2 text-right">{fmtCurrency(Number(row.value || 0))}</td>
                         <td className="py-2 text-right">
-                          {isEditing ? (
-                            <div className="inline-flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => saveRow(activeManualTab)}
-                                disabled={savingRow === rowKey}
-                                className="px-3 py-1 rounded-md bg-[#50C878] text-black disabled:opacity-50"
-                              >
-                                Save
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => cancelEdit(activeManualTab)}
-                                className="px-3 py-1 rounded-md bg-[#3a3a3a] text-gray-200"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => startEdit(row, activeManualTab)}
-                              className="px-3 py-1 rounded-md bg-[#3a3a3a] text-gray-200 hover:bg-[#474747]"
-                            >
-                              Edit
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(row, activeManualTab)}
+                            className="px-3 py-1 rounded-md bg-[#3a3a3a] text-gray-200 hover:bg-[#474747]"
+                          >
+                            Edit
+                          </button>
                         </td>
                       </tr>
                     );
@@ -896,6 +899,284 @@ export default function NetWorthPage() {
             </p>
           </div>
         </div>
+
+        {manualModalOpen && (
+          <div
+            className="fixed inset-0 z-50 bg-black/50 p-4 flex items-center justify-center"
+            onClick={() => setManualModalOpen(false)}
+          >
+            <div
+              className="w-full max-w-2xl rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+                <h3 className="text-white font-semibold">
+                  {manualFormMode === "create" ? "Add" : "Edit"} {manualFormTab === "assets" ? "Asset" : "Liability"}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setManualModalOpen(false)}
+                  className="px-2 py-1 rounded-md text-gray-300 hover:text-white hover:bg-[#2f2f2f]"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="p-4 grid gap-3 md:grid-cols-2">
+                <label className="text-sm text-gray-300">
+                  Name
+                  <input
+                    value={manualForm.name}
+                    onChange={(e) => setManualForm((prev) => ({ ...prev, name: e.target.value }))}
+                    className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                    placeholder={manualFormTab === "assets" ? "Primary Residence, Toyota Camry..." : "Chase Freedom, Mortgage..."}
+                  />
+                </label>
+                <label className="text-sm text-gray-300">
+                  Category
+                  <select
+                    value={manualForm.category}
+                    onChange={(e) => setManualForm((prev) => ({ ...prev, category: e.target.value }))}
+                    className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                  >
+                    {(manualFormTab === "assets" ? ASSET_CATEGORIES : LIABILITY_CATEGORIES).map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-sm text-gray-300">
+                  Current Value
+                  <input
+                    value={manualForm.value}
+                    onChange={(e) => setManualForm((prev) => ({ ...prev, value: e.target.value }))}
+                    className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white text-right"
+                    placeholder="0.00"
+                  />
+                </label>
+                <label className="text-sm text-gray-300">
+                  Acquisition Date
+                  <input
+                    type="date"
+                    value={manualForm.acquisitionDate}
+                    onChange={(e) =>
+                      setManualForm((prev) => ({ ...prev, acquisitionDate: e.target.value }))
+                    }
+                    className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                  />
+                </label>
+
+                {isVehicleAsset && (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      Year
+                      <input
+                        value={manualForm.details.year ?? ""}
+                        onChange={(e) => setDetailField("year", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Model
+                      <input
+                        value={manualForm.details.model ?? ""}
+                        onChange={(e) => setDetailField("model", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Current Miles
+                      <input
+                        value={manualForm.details.currentMiles ?? ""}
+                        onChange={(e) => setDetailField("currentMiles", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Debt Financed?
+                      <select
+                        value={manualForm.details.debtFinanced ?? ""}
+                        onChange={(e) => setDetailField("debtFinanced", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      >
+                        <option value="">Select</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                      </select>
+                    </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                      Remaining Auto Loan Balance
+                      <input
+                        value={manualForm.details.loanBalance ?? ""}
+                        onChange={(e) => setDetailField("loanBalance", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                  </>
+                )}
+
+                {isRealEstateAsset && (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      Property Type
+                      <input
+                        value={manualForm.details.propertyType ?? ""}
+                        onChange={(e) => setDetailField("propertyType", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Address
+                      <input
+                        value={manualForm.details.address ?? ""}
+                        onChange={(e) => setDetailField("address", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Sq Ft
+                      <input
+                        value={manualForm.details.squareFeet ?? ""}
+                        onChange={(e) => setDetailField("squareFeet", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Mortgage Financed?
+                      <select
+                        value={manualForm.details.mortgageFinanced ?? ""}
+                        onChange={(e) => setDetailField("mortgageFinanced", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      >
+                        <option value="">Select</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                      </select>
+                    </label>
+                    <label className="text-sm text-gray-300 md:col-span-2">
+                      Remaining Mortgage Balance
+                      <input
+                        value={manualForm.details.mortgageBalance ?? ""}
+                        onChange={(e) => setDetailField("mortgageBalance", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                  </>
+                )}
+
+                {isPersonalAsset && (
+                  <label className="text-sm text-gray-300 md:col-span-2">
+                    Notes / Description
+                    <input
+                      value={manualForm.details.notes ?? ""}
+                      onChange={(e) => setDetailField("notes", e.target.value)}
+                      className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                    />
+                  </label>
+                )}
+
+                {!isAssetForm && (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      Lender / Issuer
+                      <input
+                        value={manualForm.details.lender ?? ""}
+                        onChange={(e) => setDetailField("lender", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Interest Rate (%)
+                      <input
+                        value={manualForm.details.interestRate ?? ""}
+                        onChange={(e) => setDetailField("interestRate", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Minimum Payment
+                      <input
+                        value={manualForm.details.minimumPayment ?? ""}
+                        onChange={(e) => setDetailField("minimumPayment", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                  </>
+                )}
+
+                {isCreditCardLiability && (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      Last 4 Digits
+                      <input
+                        value={manualForm.details.last4 ?? ""}
+                        onChange={(e) => setDetailField("last4", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Credit Limit
+                      <input
+                        value={manualForm.details.creditLimit ?? ""}
+                        onChange={(e) => setDetailField("creditLimit", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                  </>
+                )}
+
+                {isLoanLiability && (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      Loan Type
+                      <input
+                        value={manualForm.details.loanType ?? ""}
+                        onChange={(e) => setDetailField("loanType", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      Term (months)
+                      <input
+                        value={manualForm.details.termMonths ?? ""}
+                        onChange={(e) => setDetailField("termMonths", e.target.value)}
+                        className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                      />
+                    </label>
+                  </>
+                )}
+
+                {isMortgageLiability && (
+                  <label className="text-sm text-gray-300 md:col-span-2">
+                    Property Address
+                    <input
+                      value={manualForm.details.propertyAddress ?? ""}
+                      onChange={(e) => setDetailField("propertyAddress", e.target.value)}
+                      className="mt-1 w-full rounded-md bg-[#1f1f1f] border border-charcoal-dark px-2 py-1 text-white"
+                    />
+                  </label>
+                )}
+              </div>
+              <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2 bg-[#252525]">
+                <button
+                  type="button"
+                  onClick={() => setManualModalOpen(false)}
+                  className="px-3 py-1.5 rounded-md bg-[#3a3a3a] text-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveManualForm}
+                  disabled={Boolean(savingRow)}
+                  className="px-3 py-1.5 rounded-md bg-[#50C878] text-black disabled:opacity-50"
+                >
+                  {savingRow ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </DashboardLayout>
   );

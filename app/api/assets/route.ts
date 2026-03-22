@@ -9,6 +9,8 @@ type ManualItem = {
   name: string;
   value: number;
   category: string;
+  acquisition_date?: string | null;
+  details?: Record<string, unknown>;
   updated_at?: string;
 };
 
@@ -22,6 +24,8 @@ async function ensureManualAssetsTable(sql: any): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now()
     )
   `;
+  await sql`ALTER TABLE manual_assets ADD COLUMN IF NOT EXISTS acquisition_date date`;
+  await sql`ALTER TABLE manual_assets ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}'::jsonb`;
 }
 
 function toNumber(value: unknown): number | null {
@@ -40,6 +44,17 @@ function normalizeItem(raw: unknown): ManualItem | null {
   const category = typeof candidate.category === "string" ? candidate.category.trim() : "";
   const value = toNumber(candidate.value);
   const providedId = typeof candidate.id === "string" ? candidate.id.trim() : "";
+  const acquisitionDateRaw =
+    typeof candidate.acquisition_date === "string"
+      ? candidate.acquisition_date
+      : typeof candidate.acquisitionDate === "string"
+        ? candidate.acquisitionDate
+        : "";
+  const acquisition_date = acquisitionDateRaw.trim() || null;
+  const details =
+    candidate.details && typeof candidate.details === "object" && !Array.isArray(candidate.details)
+      ? (candidate.details as Record<string, unknown>)
+      : {};
 
   if (!name || !category || value === null) return null;
 
@@ -48,6 +63,8 @@ function normalizeItem(raw: unknown): ManualItem | null {
     name,
     value,
     category,
+    acquisition_date,
+    details,
   };
 }
 
@@ -71,7 +88,7 @@ export async function GET() {
     const sql = neon(connectionString);
     await ensureManualAssetsTable(sql);
     const rows = await sql`
-      SELECT id, name, value, category, updated_at
+      SELECT id, name, value, category, acquisition_date, details, updated_at
       FROM manual_assets
       ORDER BY updated_at DESC, name ASC
     `;
@@ -81,6 +98,11 @@ export async function GET() {
       name: String(row.name),
       value: Number(row.value),
       category: String(row.category),
+      acquisition_date: row.acquisition_date ? String(row.acquisition_date) : null,
+      details:
+        row.details && typeof row.details === "object" && !Array.isArray(row.details)
+          ? (row.details as Record<string, unknown>)
+          : {},
       updated_at: String(row.updated_at),
     }));
 
@@ -121,14 +143,16 @@ export async function POST(request: NextRequest) {
     const saved: ManualItem[] = [];
     for (const item of items) {
       const rows = await sql`
-        INSERT INTO manual_assets (id, name, value, category)
-        VALUES (${item.id}, ${item.name}, ${item.value}, ${item.category})
+        INSERT INTO manual_assets (id, name, value, category, acquisition_date, details)
+        VALUES (${item.id}, ${item.name}, ${item.value}, ${item.category}, ${item.acquisition_date}::date, ${item.details ?? {}})
         ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
           value = EXCLUDED.value,
           category = EXCLUDED.category,
+          acquisition_date = EXCLUDED.acquisition_date,
+          details = EXCLUDED.details,
           updated_at = now()
-        RETURNING id, name, value, category, updated_at
+        RETURNING id, name, value, category, acquisition_date, details, updated_at
       `;
       const row = rows[0];
       saved.push({
@@ -136,6 +160,11 @@ export async function POST(request: NextRequest) {
         name: String(row.name),
         value: Number(row.value),
         category: String(row.category),
+        acquisition_date: row.acquisition_date ? String(row.acquisition_date) : null,
+        details:
+          row.details && typeof row.details === "object" && !Array.isArray(row.details)
+            ? (row.details as Record<string, unknown>)
+            : {},
         updated_at: String(row.updated_at),
       });
     }

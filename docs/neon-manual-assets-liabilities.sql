@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS manual_assets (
   name text NOT NULL,
   value numeric(14, 2) NOT NULL,
   category text NOT NULL,
+  acquisition_date date,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -11,8 +13,15 @@ CREATE TABLE IF NOT EXISTS manual_liabilities (
   name text NOT NULL,
   value numeric(14, 2) NOT NULL,
   category text NOT NULL,
+  acquisition_date date,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE manual_assets ADD COLUMN IF NOT EXISTS acquisition_date date;
+ALTER TABLE manual_assets ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE manual_liabilities ADD COLUMN IF NOT EXISTS acquisition_date date;
+ALTER TABLE manual_liabilities ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS snaptrade_balance_snapshots (
   id bigserial PRIMARY KEY,
