@@ -39,3 +39,7 @@ EXPENSE_CATEGORIES.forEach((cat, i) => {
 });
 
 export const BUDGET_STORAGE_KEY = "financial-dashboard-budget-goals";
+
+export const ASSET_CATEGORIES = ["Real Estate", "Vehicle", "Personal"] as const;
+
+export const LIABILITY_CATEGORIES = ["Credit Card", "Loan", "Mortgage"] as const;
