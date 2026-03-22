@@ -66,6 +66,40 @@ async function loadSnapshotHistory(sql: any): Promise<HistoryPoint[]> {
     .filter((point: HistoryPoint) => point.value > 0);
 }
 
+async function persistHistoryPoints(sql: any, points: HistoryPoint[]): Promise<void> {
+  for (const point of points) {
+    if (!point.date || !Number.isFinite(point.value) || point.value <= 0) continue;
+    await sql`
+      INSERT INTO snaptrade_balance_snapshots (
+        fetched_at,
+        balances,
+        account_count,
+        matched_accounts,
+        detail_failures,
+        fidelity_total,
+        fidelity_brokerage,
+        fidelity_roth_ira
+      )
+      SELECT
+        ${point.date}::timestamptz,
+        ${{
+          Fidelity: point.value,
+        }},
+        0,
+        0,
+        0,
+        ${point.value},
+        ${point.value},
+        0
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM snaptrade_balance_snapshots s
+        WHERE s.fetched_at = ${point.date}::timestamptz
+      )
+    `;
+  }
+}
+
 async function loadExperimentalFidelityHistory(): Promise<HistoryPoint[]> {
   const clientId = process.env.SNAPTRADE_CLIENT_ID;
   const consumerKey = process.env.SNAPTRADE_CONSUMER_KEY;
@@ -122,9 +156,41 @@ async function loadExperimentalFidelityHistory(): Promise<HistoryPoint[]> {
 
 export async function GET() {
   const connectionString = process.env.DATABASE_URL;
+  if (connectionString) {
+    try {
+      const sql = neon(connectionString);
+      await ensureSnapshotsTable(sql);
+      const snapshotPoints = await loadSnapshotHistory(sql);
+      if (snapshotPoints.length > 0) {
+        return NextResponse.json({
+          points: snapshotPoints,
+          source: "snapshots",
+        } satisfies SnaptradeHistoryResponse);
+      }
+    } catch (err) {
+      console.error("SnapTrade snapshot history pre-check error:", err);
+    }
+  }
+
   try {
     const experimentalPoints = await loadExperimentalFidelityHistory();
     if (experimentalPoints.length > 0) {
+      if (connectionString) {
+        try {
+          const sql = neon(connectionString);
+          await ensureSnapshotsTable(sql);
+          await persistHistoryPoints(sql, experimentalPoints);
+          const snapshotPoints = await loadSnapshotHistory(sql);
+          if (snapshotPoints.length > 0) {
+            return NextResponse.json({
+              points: snapshotPoints,
+              source: "snapshots",
+            } satisfies SnaptradeHistoryResponse);
+          }
+        } catch (err) {
+          console.error("SnapTrade experimental history persistence error:", err);
+        }
+      }
       return NextResponse.json({
         points: experimentalPoints,
         source: "experimental",
