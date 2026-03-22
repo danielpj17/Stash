@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { X, Save, PlusCircle, Loader2, Plus } from "lucide-react";
+import { X, Save, PlusCircle, Loader2, Plus, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
@@ -10,6 +10,8 @@ import { useRefresh } from "@/contexts/RefreshContext";
 import { useExpensesData } from "@/contexts/ExpensesDataContext";
 import { rowMatchesMonth, transferMatchesMonth, submitTransfer } from "@/services/sheetsApi";
 import type { SheetRow } from "@/services/sheetsApi";
+import { refreshSnaptradeBalances } from "@/services/snaptradeApi";
+import type { SupportedBroker } from "@/services/snaptradeApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
 import {
   PieChart,
@@ -98,6 +100,19 @@ function formatDateMMDDYY(timestamp?: string): string {
   const d = new Date(timestamp);
   if (Number.isNaN(d.getTime())) return "\u2014";
   return d.toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "2-digit" });
+}
+
+function formatDateTimeMMDDYYHM(timestamp?: string): string {
+  if (!timestamp) return "\u2014";
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "\u2014";
+  return d.toLocaleString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 type DailyPoint = { label: string; amount: number };
@@ -272,6 +287,7 @@ const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   "Charles Schwab": 0,
   Ally: 0,
 };
+const LIVE_BROKER_ACCOUNT_KEYS: SupportedBroker[] = ["Fidelity", "Robinhood", "Charles Schwab"];
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
@@ -299,6 +315,10 @@ export default function BudgetPage() {
   const [tfAmount, setTfAmount] = useState("");
   const [tfStatus, setTfStatus] = useState<"idle" | "submitting" | "error">("idle");
   const [tfError, setTfError] = useState("");
+  const [liveBrokerBalances, setLiveBrokerBalances] = useState<Partial<Record<SupportedBroker, number>>>({});
+  const [balancesFetchedAt, setBalancesFetchedAt] = useState<string | null>(null);
+  const [balancesRefreshStatus, setBalancesRefreshStatus] = useState<"idle" | "refreshing" | "error">("idle");
+  const [balancesRefreshError, setBalancesRefreshError] = useState("");
 
   const rows = useMemo(
     () => allRows.filter((r) => rowMatchesMonth(r, selectedMonth)),
@@ -471,7 +491,7 @@ export default function BudgetPage() {
     [allRows]
   );
 
-  const accountBalances = useMemo(() => {
+  const computedAccountBalances = useMemo(() => {
     const balances: Record<string, number> = { ...BASE_ACCOUNT_BALANCES };
     for (const t of allTransfers) {
       const amt = t.amount;
@@ -492,6 +512,17 @@ export default function BudgetPage() {
       (balances["Wells Fargo Checking"] ?? 0) + checkingDelta;
     return balances;
   }, [allTransfers, allTimeIncomeTotal, allTimeExpenseTotal]);
+
+  const accountBalances = useMemo(() => {
+    const merged = { ...computedAccountBalances };
+    for (const key of LIVE_BROKER_ACCOUNT_KEYS) {
+      const liveValue = liveBrokerBalances[key];
+      if (typeof liveValue === "number" && Number.isFinite(liveValue)) {
+        merged[key] = liveValue;
+      }
+    }
+    return merged;
+  }, [computedAccountBalances, liveBrokerBalances]);
 
   const visibleAccountBalances = useMemo(() => {
     return Object.entries(accountBalances).filter(
@@ -566,6 +597,22 @@ export default function BudgetPage() {
       setTfError(err instanceof Error ? err.message : "Failed to submit transfer.");
     }
   }, [tfFrom, tfTo, tfAmount, triggerRefresh]);
+
+  const handleRefreshAccountBalances = useCallback(async () => {
+    setBalancesRefreshStatus("refreshing");
+    setBalancesRefreshError("");
+    try {
+      const data = await refreshSnaptradeBalances();
+      setLiveBrokerBalances(data.balances);
+      setBalancesFetchedAt(data.fetchedAt);
+      setBalancesRefreshStatus("idle");
+    } catch (err) {
+      setBalancesRefreshStatus("error");
+      setBalancesRefreshError(
+        err instanceof Error ? err.message : "Failed to refresh account balances."
+      );
+    }
+  }, []);
 
   /* ---------- render ---------- */
 
@@ -1062,11 +1109,35 @@ export default function BudgetPage() {
             </div>
 
             <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden flex flex-col">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">Account Balances</h2>
+                <div className="flex items-center gap-2">
+                  {balancesFetchedAt && (
+                    <span className="text-xs text-gray-400 whitespace-nowrap">
+                      Updated {formatDateTimeMMDDYYHM(balancesFetchedAt)}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRefreshAccountBalances}
+                    disabled={balancesRefreshStatus === "refreshing"}
+                    className="p-1.5 rounded-md text-gray-400 hover:text-[#50C878] hover:bg-[#252525] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Refresh account balances"
+                    title="Refresh account balances"
+                  >
+                    {balancesRefreshStatus === "refreshing" ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
               <div className="p-3 flex-1 min-h-0 bg-[#252525]">
                 <div className="overflow-x-auto -mx-2">
+                  {balancesRefreshStatus === "error" && (
+                    <p className="text-red-400 text-xs px-2 pb-2">{balancesRefreshError}</p>
+                  )}
                   {visibleAccountBalances.length === 0 ? (
                     <p className="text-gray-400 text-sm px-2 py-2">No accounts with a non-zero balance.</p>
                   ) : (

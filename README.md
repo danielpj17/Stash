@@ -10,6 +10,7 @@ A responsive financial dashboard built with **Next.js 14**, **Tailwind CSS**, an
 - **Theme**: Charcoal (`#1E1E1E`) with light blue accent (`#7BC0FF`)
 - **Google Sheets backend**: Optional; connect via a Google Apps Script Web App (see below).
 - **Budget goals**: Stored in the browser (localStorage).
+- **SnapTrade manual refresh**: Account Balances card can pull live brokerage balances on demand.
 
 ## Google Sheets backend
 
@@ -26,6 +27,24 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+## SnapTrade manual account-balance refresh
+
+The Budget page Account Balances card includes a refresh button in the card header. It only
+fetches SnapTrade balances when clicked (no polling, no automatic refresh on page load).
+
+Add these server-side env vars:
+
+```bash
+SNAPTRADE_CLIENT_ID=...
+SNAPTRADE_CONSUMER_KEY=...
+SNAPTRADE_USER_ID=...
+SNAPTRADE_USER_SECRET=...
+```
+
+The app calls `/api/snaptrade/refresh-balances` and overlays live values for supported
+brokerages (currently Fidelity, Robinhood, and Charles Schwab) while keeping other accounts
+from local budget math.
 
 ## Scripts
 
