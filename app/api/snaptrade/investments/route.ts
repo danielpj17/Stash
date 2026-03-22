@@ -51,7 +51,7 @@ export async function GET() {
     const sql = neon(connectionString);
     await ensureSnapshotsTable(sql);
     const rows = await sql`
-      SELECT fetched_at, fidelity_total, fidelity_brokerage, fidelity_roth_ira
+      SELECT fetched_at, fidelity_total, fidelity_brokerage, fidelity_roth_ira, balances
       FROM snaptrade_balance_snapshots
       ORDER BY fetched_at DESC
       LIMIT 1
@@ -66,10 +66,16 @@ export async function GET() {
       } satisfies InvestmentsResponse);
     }
 
+    const fromBalances = asFiniteNumber((row.balances as Record<string, unknown> | undefined)?.Fidelity);
+    const total = asFiniteNumber(row.fidelity_total) > 0 ? asFiniteNumber(row.fidelity_total) : fromBalances;
+    const storedBrokerage = asFiniteNumber(row.fidelity_brokerage);
+    const storedRoth = asFiniteNumber(row.fidelity_roth_ira);
+    const brokerage = storedBrokerage + storedRoth > 0 ? storedBrokerage : total;
+    const rothIra = storedBrokerage + storedRoth > 0 ? storedRoth : 0;
     return NextResponse.json({
-      brokerage: asFiniteNumber(row.fidelity_brokerage),
-      rothIra: asFiniteNumber(row.fidelity_roth_ira),
-      fidelityTotal: asFiniteNumber(row.fidelity_total),
+      brokerage,
+      rothIra,
+      fidelityTotal: total,
       fetchedAt: String(row.fetched_at),
     } satisfies InvestmentsResponse);
   } catch (err) {

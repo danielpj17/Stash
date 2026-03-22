@@ -48,7 +48,7 @@ async function ensureSnapshotsTable(sql: any): Promise<void> {
 
 async function loadSnapshotHistory(sql: any): Promise<HistoryPoint[]> {
   const rows = await sql`
-    SELECT fetched_at, fidelity_total
+    SELECT fetched_at, fidelity_total, balances
     FROM snaptrade_balance_snapshots
     ORDER BY fetched_at ASC
     LIMIT 365
@@ -56,7 +56,12 @@ async function loadSnapshotHistory(sql: any): Promise<HistoryPoint[]> {
   return rows
     .map((row: any) => ({
       date: String(row.fetched_at),
-      value: asFiniteNumber(row.fidelity_total),
+      value: (() => {
+        const stored = asFiniteNumber(row.fidelity_total);
+        if (stored > 0) return stored;
+        const fromBalances = asFiniteNumber((row.balances as Record<string, unknown> | undefined)?.Fidelity);
+        return fromBalances;
+      })(),
     }))
     .filter((point: HistoryPoint) => point.value > 0);
 }

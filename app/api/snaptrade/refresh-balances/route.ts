@@ -87,16 +87,24 @@ async function loadLatestSnapshot(sql: any): Promise<RefreshBalancesResponse | n
   `;
   const row = rows[0];
   if (!row) return null;
+  const balances = (row.balances ?? {}) as Partial<Record<SupportedBroker, number>>;
+  const balanceFidelity = asFiniteNumber((balances as Record<string, unknown>).Fidelity);
+  const storedFidelityTotal = asFiniteNumber(row.fidelity_total);
+  const fidelityTotal = storedFidelityTotal > 0 ? storedFidelityTotal : balanceFidelity;
+  const storedBrokerage = asFiniteNumber(row.fidelity_brokerage);
+  const storedRoth = asFiniteNumber(row.fidelity_roth_ira);
+  const brokerage = storedBrokerage + storedRoth > 0 ? storedBrokerage : fidelityTotal;
+  const rothIra = storedBrokerage + storedRoth > 0 ? storedRoth : 0;
   return {
-    balances: (row.balances ?? {}) as Partial<Record<SupportedBroker, number>>,
+    balances,
     fetchedAt: String(row.fetched_at),
     accountCount: asFiniteNumber(row.account_count),
     matchedAccounts: asFiniteNumber(row.matched_accounts),
     detailFailures: asFiniteNumber(row.detail_failures),
     investments: {
-      brokerage: asFiniteNumber(row.fidelity_brokerage),
-      rothIra: asFiniteNumber(row.fidelity_roth_ira),
-      fidelityTotal: asFiniteNumber(row.fidelity_total),
+      brokerage,
+      rothIra,
+      fidelityTotal,
     },
   };
 }
