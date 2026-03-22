@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { Snaptrade } from "snaptrade-typescript-sdk";
+import { neon } from "@neondatabase/serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,12 @@ type RefreshBalancesResponse = {
   fetchedAt: string;
   accountCount: number;
   matchedAccounts: number;
+  detailFailures: number;
+  investments: {
+    brokerage: number;
+    rothIra: number;
+    fidelityTotal: number;
+  };
 };
 
 function mapInstitutionToBroker(institutionName: string): SupportedBroker | null {
@@ -26,10 +33,143 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function asFiniteNumber(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function classifyFidelityAccountBucket(accountName: string, rawType: string): "rothIra" | "brokerage" {
+  const value = `${accountName} ${rawType}`.trim().toLowerCase();
+  if (value.includes("roth") && value.includes("ira")) return "rothIra";
+  return "brokerage";
+}
+
 function getMissingEnvVars(env: Record<string, string | undefined>): string[] {
   return Object.entries(env)
     .filter(([, value]) => !value || value.trim().length === 0)
     .map(([key]) => key);
+}
+
+async function ensureSnapshotsTable(sql: any): Promise<void> {
+  await sql`
+    CREATE TABLE IF NOT EXISTS snaptrade_balance_snapshots (
+      id bigserial PRIMARY KEY,
+      fetched_at timestamptz NOT NULL,
+      balances jsonb NOT NULL,
+      account_count integer NOT NULL,
+      matched_accounts integer NOT NULL,
+      detail_failures integer NOT NULL,
+      fidelity_total numeric(14, 2) NOT NULL DEFAULT 0,
+      fidelity_brokerage numeric(14, 2) NOT NULL DEFAULT 0,
+      fidelity_roth_ira numeric(14, 2) NOT NULL DEFAULT 0
+    )
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_snaptrade_balance_snapshots_fetched_at
+    ON snaptrade_balance_snapshots (fetched_at DESC)
+  `;
+}
+
+async function loadLatestSnapshot(sql: any): Promise<RefreshBalancesResponse | null> {
+  const rows = await sql`
+    SELECT
+      fetched_at,
+      balances,
+      account_count,
+      matched_accounts,
+      detail_failures,
+      fidelity_total,
+      fidelity_brokerage,
+      fidelity_roth_ira
+    FROM snaptrade_balance_snapshots
+    ORDER BY fetched_at DESC
+    LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    balances: (row.balances ?? {}) as Partial<Record<SupportedBroker, number>>,
+    fetchedAt: String(row.fetched_at),
+    accountCount: asFiniteNumber(row.account_count),
+    matchedAccounts: asFiniteNumber(row.matched_accounts),
+    detailFailures: asFiniteNumber(row.detail_failures),
+    investments: {
+      brokerage: asFiniteNumber(row.fidelity_brokerage),
+      rothIra: asFiniteNumber(row.fidelity_roth_ira),
+      fidelityTotal: asFiniteNumber(row.fidelity_total),
+    },
+  };
+}
+
+async function saveSnapshot(
+  sql: any,
+  payload: RefreshBalancesResponse
+): Promise<void> {
+  await sql`
+    INSERT INTO snaptrade_balance_snapshots (
+      fetched_at,
+      balances,
+      account_count,
+      matched_accounts,
+      detail_failures,
+      fidelity_total,
+      fidelity_brokerage,
+      fidelity_roth_ira
+    )
+    VALUES (
+      ${payload.fetchedAt}::timestamptz,
+      ${payload.balances},
+      ${payload.accountCount},
+      ${payload.matchedAccounts},
+      ${payload.detailFailures},
+      ${payload.investments.fidelityTotal},
+      ${payload.investments.brokerage},
+      ${payload.investments.rothIra}
+    )
+  `;
+}
+
+export async function GET() {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    return NextResponse.json({
+      balances: {},
+      fetchedAt: new Date(0).toISOString(),
+      accountCount: 0,
+      matchedAccounts: 0,
+      detailFailures: 0,
+      investments: {
+        brokerage: 0,
+        rothIra: 0,
+        fidelityTotal: 0,
+      },
+    } satisfies RefreshBalancesResponse);
+  }
+
+  try {
+    const sql = neon(connectionString);
+    await ensureSnapshotsTable(sql);
+    const latest = await loadLatestSnapshot(sql);
+    if (latest) return NextResponse.json(latest);
+    return NextResponse.json({
+      balances: {},
+      fetchedAt: new Date(0).toISOString(),
+      accountCount: 0,
+      matchedAccounts: 0,
+      detailFailures: 0,
+      investments: {
+        brokerage: 0,
+        rothIra: 0,
+        fidelityTotal: 0,
+      },
+    } satisfies RefreshBalancesResponse);
+  } catch (err) {
+    console.error("SnapTrade latest snapshot GET error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to load last balances" },
+      { status: 502 }
+    );
+  }
 }
 
 export async function POST() {
@@ -80,25 +220,38 @@ export async function POST() {
             userSecret: safeUserSecret,
             accountId: account.id,
           });
-          return details.data;
+          return { account: details.data, isDetailSuccess: true };
         } catch (err) {
-          // Keep the refresh resilient if one connected account fails.
           console.error(`SnapTrade account detail error for ${account.id}:`, err);
-          return account;
+          return { account: null, isDetailSuccess: false };
         }
       })
     );
 
     const balances: Partial<Record<SupportedBroker, number>> = {};
     let matchedAccounts = 0;
+    let detailFailures = 0;
+    let fidelityBrokerage = 0;
+    let fidelityRothIra = 0;
 
-    for (const account of accountDetails) {
+    for (const detail of accountDetails) {
+      if (!detail.isDetailSuccess || !detail.account) {
+        detailFailures += 1;
+        continue;
+      }
+      const account = detail.account;
       const key = mapInstitutionToBroker(account.institution_name ?? "");
       if (!key) continue;
       const amount = account.balance?.total?.amount;
       if (!isFiniteNumber(amount)) continue;
       balances[key] = (balances[key] ?? 0) + amount;
       matchedAccounts += 1;
+
+      if (key === "Fidelity") {
+        const bucket = classifyFidelityAccountBucket(account.name ?? "", account.raw_type ?? "");
+        if (bucket === "rothIra") fidelityRothIra += amount;
+        else fidelityBrokerage += amount;
+      }
     }
 
     const payload: RefreshBalancesResponse = {
@@ -106,7 +259,31 @@ export async function POST() {
       fetchedAt: new Date().toISOString(),
       accountCount: openAccounts.length,
       matchedAccounts,
+      detailFailures,
+      investments: {
+        brokerage: fidelityBrokerage,
+        rothIra: fidelityRothIra,
+        fidelityTotal: fidelityBrokerage + fidelityRothIra,
+      },
     };
+
+    const connectionString = process.env.DATABASE_URL;
+    if (connectionString) {
+      try {
+        const sql = neon(connectionString);
+        await ensureSnapshotsTable(sql);
+        if (payload.matchedAccounts > 0) {
+          await saveSnapshot(sql, payload);
+        } else {
+          const latest = await loadLatestSnapshot(sql);
+          if (latest) {
+            return NextResponse.json(latest);
+          }
+        }
+      } catch (err) {
+        console.error("SnapTrade snapshot persistence error:", err);
+      }
+    }
 
     return NextResponse.json(payload);
   } catch (err) {

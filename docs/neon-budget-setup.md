@@ -16,4 +16,5 @@ INSERT INTO budget_store (id, data) VALUES (1, '{}')
 ON CONFLICT (id) DO NOTHING;
 ```
 
-4. Restart your dev server.
+4. Run the manual assets/liabilities setup script from `docs/neon-manual-assets-liabilities.sql` in the same SQL editor.
+5. Restart your dev server.

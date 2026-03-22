@@ -1,5 +1,5 @@
 import { getExpenses, getTransfers } from "@/services/sheetsApi";
-import { refreshSnaptradeBalances } from "@/services/snaptradeApi";
+import { getLatestSnaptradeBalances } from "@/services/snaptradeApi";
 
 const ASSETS_API = "/api/assets";
 const LIABILITIES_API = "/api/liabilities";
@@ -67,7 +67,7 @@ function sumValues(items: Array<{ value: number }>): number {
 
 export async function getNetWorthSummary(month?: string): Promise<NetWorthSummary> {
   const [balancesData, manualAssets, manualLiabilities, expenses, transfers] = await Promise.all([
-    refreshSnaptradeBalances(),
+    getLatestSnaptradeBalances(),
     fetchJson<ManualAsset[]>(ASSETS_API),
     fetchJson<ManualLiability[]>(LIABILITIES_API),
     getExpenses(month),

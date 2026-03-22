@@ -12,6 +12,18 @@ type ManualItem = {
   updated_at?: string;
 };
 
+async function ensureManualLiabilitiesTable(sql: any): Promise<void> {
+  await sql`
+    CREATE TABLE IF NOT EXISTS manual_liabilities (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      value numeric(14, 2) NOT NULL,
+      category text NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+}
+
 function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim().length > 0) {
@@ -57,6 +69,7 @@ export async function GET() {
 
   try {
     const sql = neon(connectionString);
+    await ensureManualLiabilitiesTable(sql);
     const rows = await sql`
       SELECT id, name, value, category, updated_at
       FROM manual_liabilities
@@ -104,6 +117,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const sql = neon(connectionString);
+    await ensureManualLiabilitiesTable(sql);
     const saved: ManualItem[] = [];
     for (const item of items) {
       const rows = await sql`

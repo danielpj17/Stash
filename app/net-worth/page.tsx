@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
 import { useMonth } from "@/contexts/MonthContext";
@@ -8,6 +8,11 @@ import { useRefresh } from "@/contexts/RefreshContext";
 import { useExpensesData } from "@/contexts/ExpensesDataContext";
 import { rowMatchesMonth } from "@/services/sheetsApi";
 import { getNetWorthSummary, type NetWorthSummary } from "@/services/netWorthService";
+import {
+  getSnaptradeHistory,
+  getSnaptradeInvestments,
+  refreshSnaptradeBalances,
+} from "@/services/snaptradeApi";
 import {
   ASSET_CATEGORIES,
   LIABILITY_CATEGORIES,
@@ -42,9 +47,10 @@ type EditingState = {
 };
 
 type GrowthPoint = {
-  monthKey: string;
+  month: string;
   label: string;
-  growth: number;
+  sheetsNetChange: number | null;
+  fidelityValue: number | null;
 };
 
 const fmtCurrency = (n: number) =>
@@ -110,6 +116,16 @@ function monthLabel(key: string): string {
   return d.toLocaleDateString("en-US", { month: "short" });
 }
 
+function formatDateLabel(isoDate: string): string {
+  const d = new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit",
+  });
+}
+
 async function fetchManualItems(url: string): Promise<ManualItem[]> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
@@ -149,6 +165,24 @@ export default function NetWorthPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [goalTarget, setGoalTarget] = useState<number>(100000);
+  const [historySource, setHistorySource] = useState<"experimental" | "snapshots" | "none">("none");
+  const [fidelityHistory, setFidelityHistory] = useState<Array<{ date: string; value: number }>>([]);
+  const [investments, setInvestments] = useState<{
+    brokerage: number;
+    rothIra: number;
+    fidelityTotal: number;
+    fetchedAt: string | null;
+  }>({
+    brokerage: 0,
+    rothIra: 0,
+    fidelityTotal: 0,
+    fetchedAt: null,
+  });
+
+  const summaryReqRef = useRef(0);
+  const tableReqRef = useRef(0);
+  const historyReqRef = useRef(0);
+  const investmentsReqRef = useRef(0);
 
   const filteredRows = useMemo(
     () => allRows.filter((row) => rowMatchesMonth(row, selectedMonth)),
@@ -168,34 +202,59 @@ export default function NetWorthPage() {
       .sort((a, b) => b.amount - a.amount);
   }, [filteredRows]);
 
-  const sixMonthGrowth = useMemo<GrowthPoint[]>(() => {
-    const keys = lastSixMonthKeys();
+  const sheetsHistoryByMonth = useMemo<Record<string, number>>(() => {
     const incomeByMonth: Record<string, number> = {};
-    const expenseByMonth: Record<string, number> = {};
-
+    const expensesByMonth: Record<string, number> = {};
     allRows.forEach((row) => {
       const key = parseMonthFromRow(row);
-      if (!key || !keys.includes(key)) return;
+      if (!key) return;
       const amount = Number(row.amount || 0);
       if (!Number.isFinite(amount)) return;
 
       if (row.expenseType.trim().toLowerCase() === "income") {
         incomeByMonth[key] = (incomeByMonth[key] ?? 0) + amount;
       } else {
-        expenseByMonth[key] = (expenseByMonth[key] ?? 0) + amount;
+        expensesByMonth[key] = (expensesByMonth[key] ?? 0) + amount;
       }
     });
-
-    return keys.map((key) => ({
-      monthKey: key,
-      label: monthLabel(key),
-      growth: (incomeByMonth[key] ?? 0) - (expenseByMonth[key] ?? 0),
-    }));
+    const out: Record<string, number> = {};
+    Object.keys({ ...incomeByMonth, ...expensesByMonth }).forEach((key) => {
+      out[key] = (incomeByMonth[key] ?? 0) - (expensesByMonth[key] ?? 0);
+    });
+    return out;
   }, [allRows]);
 
+  const fidelityHistoryByMonth = useMemo<Record<string, number>>(() => {
+    const out: Record<string, number> = {};
+    const sorted = [...fidelityHistory].sort((a, b) => a.date.localeCompare(b.date));
+    for (const point of sorted) {
+      const d = new Date(point.date);
+      if (Number.isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      out[key] = point.value;
+    }
+    return out;
+  }, [fidelityHistory]);
+
+  const trendData = useMemo<GrowthPoint[]>(() => {
+    const defaultKeys = lastSixMonthKeys();
+    const dynamicKeys = Object.keys({ ...sheetsHistoryByMonth, ...fidelityHistoryByMonth });
+    const keys = [...new Set([...defaultKeys, ...dynamicKeys])]
+      .sort((a, b) => a.localeCompare(b))
+      .slice(-12);
+    return keys.map((key) => ({
+      month: key,
+      label: monthLabel(key),
+      sheetsNetChange:
+        sheetsHistoryByMonth[key] !== undefined ? Number(sheetsHistoryByMonth[key]) : null,
+      fidelityValue:
+        fidelityHistoryByMonth[key] !== undefined ? Number(fidelityHistoryByMonth[key]) : null,
+    }));
+  }, [sheetsHistoryByMonth, fidelityHistoryByMonth]);
+
   const averageMonthlyExpenses = useMemo(() => {
-    if (sixMonthGrowth.length === 0) return 0;
-    const keys = new Set(sixMonthGrowth.map((point) => point.monthKey));
+    if (trendData.length === 0) return 0;
+    const keys = new Set(trendData.map((point) => point.month));
     const expenseByMonth: Record<string, number> = {};
     allRows.forEach((row) => {
       if (row.expenseType.trim().toLowerCase() === "income") return;
@@ -203,25 +262,30 @@ export default function NetWorthPage() {
       if (!key || !keys.has(key)) return;
       expenseByMonth[key] = (expenseByMonth[key] ?? 0) + Number(row.amount || 0);
     });
-    const totals = sixMonthGrowth.map((point) => expenseByMonth[point.monthKey] ?? 0);
+    const totals = trendData.map((point) => expenseByMonth[point.month] ?? 0);
     const sum = totals.reduce((acc, v) => acc + v, 0);
     return totals.length ? sum / totals.length : 0;
-  }, [allRows, sixMonthGrowth]);
+  }, [allRows, trendData]);
 
   const loadSummary = useCallback(async () => {
+    const reqId = ++summaryReqRef.current;
     setSummaryLoading(true);
     setSummaryError(null);
     try {
       const data = await getNetWorthSummary(selectedMonth);
+      if (reqId !== summaryReqRef.current) return;
       setSummary(data);
     } catch (err) {
+      if (reqId !== summaryReqRef.current) return;
       setSummaryError(err instanceof Error ? err.message : "Failed to load net worth summary");
     } finally {
+      if (reqId !== summaryReqRef.current) return;
       setSummaryLoading(false);
     }
   }, [selectedMonth]);
 
   const loadManualTables = useCallback(async () => {
+    const reqId = ++tableReqRef.current;
     setTableLoading(true);
     setTableError(null);
     try {
@@ -229,12 +293,48 @@ export default function NetWorthPage() {
         fetchManualItems("/api/assets"),
         fetchManualItems("/api/liabilities"),
       ]);
+      if (reqId !== tableReqRef.current) return;
       setAssets(assetData);
       setLiabilities(liabilityData);
     } catch (err) {
+      if (reqId !== tableReqRef.current) return;
       setTableError(err instanceof Error ? err.message : "Failed to load assets/liabilities");
     } finally {
+      if (reqId !== tableReqRef.current) return;
       setTableLoading(false);
+    }
+  }, []);
+
+  const loadFidelityHistory = useCallback(async () => {
+    const reqId = ++historyReqRef.current;
+    try {
+      const data = await getSnaptradeHistory();
+      if (reqId !== historyReqRef.current) return;
+      setFidelityHistory(data.points);
+      setHistorySource(data.source);
+    } catch (err) {
+      if (reqId !== historyReqRef.current) return;
+      console.error("Failed to load Fidelity history:", err);
+      setFidelityHistory([]);
+      setHistorySource("none");
+    }
+  }, []);
+
+  const loadInvestments = useCallback(async () => {
+    const reqId = ++investmentsReqRef.current;
+    try {
+      const data = await getSnaptradeInvestments();
+      if (reqId !== investmentsReqRef.current) return;
+      setInvestments(data);
+    } catch (err) {
+      if (reqId !== investmentsReqRef.current) return;
+      console.error("Failed to load investments:", err);
+      setInvestments({
+        brokerage: 0,
+        rothIra: 0,
+        fidelityTotal: 0,
+        fetchedAt: null,
+      });
     }
   }, []);
 
@@ -252,11 +352,22 @@ export default function NetWorthPage() {
     setTableError(null);
     triggerRefresh();
     try {
-      await Promise.all([loadSummary(), loadManualTables()]);
+      await refreshSnaptradeBalances();
+      await Promise.all([
+        loadSummary(),
+        loadManualTables(),
+        loadFidelityHistory(),
+        loadInvestments(),
+      ]);
     } finally {
       setIsRefreshing(false);
     }
-  }, [triggerRefresh, loadSummary, loadManualTables]);
+  }, [triggerRefresh, loadSummary, loadManualTables, loadFidelityHistory, loadInvestments]);
+
+  useEffect(() => {
+    loadFidelityHistory();
+    loadInvestments();
+  }, [loadFidelityHistory, loadInvestments]);
 
   const liquidityRatio = useMemo(() => {
     if (!summary) return 0;
@@ -568,35 +679,58 @@ export default function NetWorthPage() {
 
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
             <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-              <h2 className="text-white font-semibold">Net Worth Growth (Last 6 Months)</h2>
+              <h2 className="text-white font-semibold">Net Worth History (Sheets + Fidelity)</h2>
             </div>
             <div className="p-4 h-[320px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={sixMonthGrowth} margin={{ top: 6, right: 6, bottom: 6, left: 2 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                  <XAxis dataKey="label" stroke="#9ca3af" tick={{ fill: "#9ca3af", fontSize: 11 }} />
-                  <YAxis
-                    stroke="#9ca3af"
-                    tick={{ fill: "#9ca3af", fontSize: 11 }}
-                    tickFormatter={(v) => `$${Number(v).toLocaleString()}`}
-                  />
-                  <Tooltip
-                    formatter={(value: number) => [fmtCurrency(Number(value)), "Growth"]}
-                    contentStyle={{
-                      backgroundColor: "#2F2F2F",
-                      border: "1px solid #474747",
-                      borderRadius: "8px",
-                      color: "#e5e7eb",
-                    }}
-                  />
-                  <Line type="monotone" dataKey="growth" stroke={PIE_COLORS[0]} strokeWidth={2.5} />
-                </LineChart>
-              </ResponsiveContainer>
+              {trendData.length === 0 ? (
+                <p className="text-sm text-gray-400">No historical trend data available yet.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={trendData} margin={{ top: 6, right: 6, bottom: 6, left: 2 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                    <XAxis dataKey="label" stroke="#9ca3af" tick={{ fill: "#9ca3af", fontSize: 11 }} />
+                    <YAxis
+                      stroke="#9ca3af"
+                      tick={{ fill: "#9ca3af", fontSize: 11 }}
+                      tickFormatter={(v) => `$${Number(v).toLocaleString()}`}
+                    />
+                    <Tooltip
+                      formatter={(value: number, name: string) => [
+                        fmtCurrency(Number(value)),
+                        name === "sheetsNetChange" ? "Sheets Net Change" : "Fidelity Value",
+                      ]}
+                      contentStyle={{
+                        backgroundColor: "#2F2F2F",
+                        border: "1px solid #474747",
+                        borderRadius: "8px",
+                        color: "#e5e7eb",
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="sheetsNetChange"
+                      stroke={PIE_COLORS[0]}
+                      strokeWidth={2.5}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="fidelityValue"
+                      stroke={PIE_COLORS[1 % PIE_COLORS.length]}
+                      strokeWidth={2.5}
+                      connectNulls
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+              <p className="text-xs text-gray-400 mt-2">
+                Fidelity history source: {historySource}
+              </p>
             </div>
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-4">
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <p className="text-sm text-gray-400">Liquidity Ratio</p>
             <p className="text-xl font-semibold text-white mt-2">{liquidityRatio.toFixed(2)}x</p>
@@ -606,6 +740,23 @@ export default function NetWorthPage() {
             <p className="text-sm text-gray-400">Runway</p>
             <p className="text-xl font-semibold text-white mt-2">{runwayMonths.toFixed(1)} months</p>
             <p className="text-xs text-gray-500 mt-1">How long liquid net worth can cover spending</p>
+          </div>
+          <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
+            <p className="text-sm text-gray-400">Current Investments</p>
+            <div className="mt-2 space-y-1">
+              <p className="text-sm text-gray-300">
+                Brokerage: <span className="text-white font-semibold">{fmtCurrency(investments.brokerage)}</span>
+              </p>
+              <p className="text-sm text-gray-300">
+                Roth IRA: <span className="text-white font-semibold">{fmtCurrency(investments.rothIra)}</span>
+              </p>
+              <p className="text-sm text-gray-300">
+                Total: <span className="text-white font-semibold">{fmtCurrency(investments.fidelityTotal)}</span>
+              </p>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              Last pulled: {investments.fetchedAt ? formatDateLabel(investments.fetchedAt) : "Not yet refreshed"}
+            </p>
           </div>
           <div className="rounded-xl bg-[#252525] border border-charcoal-dark p-4">
             <div className="flex items-center justify-between gap-2">
