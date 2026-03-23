@@ -269,7 +269,8 @@ function descriptionSimilarity(a: string, b: string): number {
 
 const MIN_FUZZY_DESCRIPTION_SIMILARITY = 0.2;
 const AUTO_MATCH_MAX_DAY_DISTANCE = 3;
-const QUESTIONABLE_MAX_DAY_DISTANCE = 14;
+const QUESTIONABLE_MAX_DAY_DISTANCE = 31;
+const TRANSFER_CANDIDATE_MAX_DAY_DISTANCE = 31;
 
 function isLikelyTransferDescription(value: string): boolean {
   const normalized = normalizeDescriptionForMatch(value);
@@ -338,7 +339,7 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
  *
  * Priority:
  * 1) Exact Match: hash exists in Neon OR amount+date equals a sheet row.
- * 2) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 14 days.
+ * 2) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 31 days.
  * 3) Transfer: negative amount matched to same-day positive amount in another account.
  * 4) Unmatched.
  */
@@ -383,7 +384,7 @@ export async function findMatches(
         if (amountKey(sheetTransfer.amount) !== amountKey(tx.amount)) return null;
         const transferDate = sheetTransfer.date ?? sheetTransfer.timestamp ?? "";
         const dayDistance = dateDistanceInDays(transferDate, tx.date);
-        if (dayDistance === null || dayDistance > 2) return null;
+        if (dayDistance === null || dayDistance > TRANSFER_CANDIDATE_MAX_DAY_DISTANCE) return null;
 
         const transferText = [
           sheetTransfer.transferFrom ?? "",
@@ -481,7 +482,7 @@ export async function findMatches(
         bankTransaction: tx,
         matchType: "questionable_match_fuzzy",
         reason:
-          "Questionable Match (Fuzzy): amount/description align and sheet date is within +/- 14 days.",
+          "Questionable Match (Fuzzy): amount/description align and sheet date is within +/- 31 days.",
         matchedSheetExpense: bestFuzzy.row,
         matchedSheetIndex: bestFuzzy.index,
       };
