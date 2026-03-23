@@ -544,17 +544,36 @@ export default function ReconcilePage() {
                       key={`${id}-${index}`}
                       className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                     >
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                         <div className="min-w-0">
+                          <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                            Bank Transaction
+                          </p>
                           <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
                             {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                           </p>
-                          {match.matchType === "questionable_match_fuzzy" && match.matchedSheetExpense && (
-                            <p className="text-xs text-yellow-300 mt-1">
-                              Questionable match: {fmtMoney(match.matchedSheetExpense.amount)} on{" "}
-                              {fmtDate(match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date)}
-                            </p>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                            Possible Sheet Match
+                          </p>
+                          {match.matchType === "questionable_match_fuzzy" && match.matchedSheetExpense ? (
+                            <>
+                              <p className="text-yellow-300 text-sm truncate">
+                                {match.matchedSheetExpense.description || "—"}
+                              </p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                {fmtDate(match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date)} •{" "}
+                                {fmtMoney(match.matchedSheetExpense.amount)}
+                                {match.matchedSheetExpense.account
+                                  ? ` • ${match.matchedSheetExpense.account}`
+                                  : ""}
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-xs text-gray-500">No candidate match</p>
                           )}
                         </div>
                         <div className="shrink-0 flex items-center gap-1">
