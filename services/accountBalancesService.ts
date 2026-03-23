@@ -34,37 +34,145 @@ const LIVE_BROKER_ACCOUNT_KEYS: SupportedBroker[] = [
   "Charles Schwab",
 ];
 
+export type AccountAnchor = {
+  accountName: string;
+  confirmedBalance: number;
+  asOfDate: string;
+};
+
+function toDateKey(value?: string): string {
+  if (!value) return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const y = parsed.getUTCFullYear();
+  const m = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(parsed.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+export function mapAccountNameToBalanceKey(raw: string): string {
+  const name = raw.trim();
+  if (!name) return name;
+  const lower = name.toLowerCase();
+
+  if (lower === "wf checking" || lower === "wells fargo" || lower === "wells fargo checking") {
+    return "Wells Fargo Checking";
+  }
+  if (lower === "wf savings" || lower === "wells fargo savings") {
+    return "Wells Fargo Savings";
+  }
+  if (lower === "venmo" || lower === "venmo - daniel" || lower === "venmo - katie") {
+    return "Venmo";
+  }
+  return name;
+}
+
+function shouldApplyByAnchor(
+  accountKey: string,
+  transactionDate: string,
+  anchorByAccount: Map<string, AccountAnchor>,
+): boolean {
+  const anchor = anchorByAccount.get(accountKey);
+  if (!anchor) return true;
+  const txDate = toDateKey(transactionDate);
+  const anchorDate = toDateKey(anchor.asOfDate);
+  if (!anchorDate) return true;
+  if (!txDate) return false;
+  // Only include transactions strictly after the anchor date.
+  return txDate > anchorDate;
+}
+
+function buildAnchorMap(anchors: AccountAnchor[]): Map<string, AccountAnchor> {
+  const map = new Map<string, AccountAnchor>();
+  for (const anchor of anchors) {
+    if (!Number.isFinite(anchor.confirmedBalance)) continue;
+    const key = mapAccountNameToBalanceKey(anchor.accountName);
+    map.set(key, {
+      accountName: key,
+      confirmedBalance: Number(anchor.confirmedBalance),
+      asOfDate: toDateKey(anchor.asOfDate),
+    });
+  }
+  return map;
+}
+
+function accountKeyForSheetRow(row: SheetRow): string {
+  const fromSheet = mapAccountNameToBalanceKey(String(row.account ?? "").trim());
+  if (fromSheet) return fromSheet;
+  return "Wells Fargo Checking";
+}
+
+export async function getAccountAnchors(): Promise<AccountAnchor[]> {
+  const res = await fetch("/api/reconciliation/anchors", { cache: "no-store" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Failed to fetch account anchors: ${res.status}`);
+  }
+  const data = (await res.json()) as { anchors?: Array<Partial<AccountAnchor>> };
+  const anchors = Array.isArray(data.anchors) ? data.anchors : [];
+  return anchors
+    .map((row) => ({
+      accountName: String(row.accountName ?? ""),
+      confirmedBalance: Number(row.confirmedBalance ?? 0),
+      asOfDate: String(row.asOfDate ?? ""),
+    }))
+    .filter((row) => row.accountName.trim() !== "" && Number.isFinite(row.confirmedBalance));
+}
+
 export function computeAccountBalances(
   allRows: SheetRow[],
   allTransfers: TransferRow[],
-  liveBrokerBalances: Partial<Record<SupportedBroker, number>>
+  liveBrokerBalances: Partial<Record<SupportedBroker, number>>,
+  accountAnchors: AccountAnchor[] = [],
 ): Record<string, number> {
+  const anchorByAccount = buildAnchorMap(accountAnchors);
   const balances: Record<string, number> = { ...BASE_ACCOUNT_BALANCES };
+  for (const [accountKey, anchor] of anchorByAccount.entries()) {
+    balances[accountKey] = anchor.confirmedBalance;
+  }
 
   for (const t of allTransfers) {
     const amt = Number(t.amount);
     if (!Number.isFinite(amt) || amt === 0) continue;
+    const txDate = toDateKey(t.timestamp);
     const fromLabel = t.transferFrom.trim();
     const toLabel = t.transferTo.trim();
-    const fromKey = TRANSFER_LABEL_TO_BALANCE_KEY[fromLabel];
-    const toKey = TRANSFER_LABEL_TO_BALANCE_KEY[toLabel];
+    const fromKey = mapAccountNameToBalanceKey(TRANSFER_LABEL_TO_BALANCE_KEY[fromLabel] ?? "");
+    const toKey = mapAccountNameToBalanceKey(TRANSFER_LABEL_TO_BALANCE_KEY[toLabel] ?? "");
 
-    if (fromKey !== undefined && balances[fromKey] !== undefined) {
+    if (
+      fromKey &&
+      balances[fromKey] !== undefined &&
+      shouldApplyByAnchor(fromKey, txDate, anchorByAccount)
+    ) {
       balances[fromKey] -= amt;
     }
-    if (toLabel !== "Misc." && toKey !== undefined && balances[toKey] !== undefined) {
+    if (
+      toLabel !== "Misc." &&
+      toKey &&
+      balances[toKey] !== undefined &&
+      shouldApplyByAnchor(toKey, txDate, anchorByAccount)
+    ) {
       balances[toKey] += amt;
     }
   }
 
-  const allTimeIncomeTotal = allRows
-    .filter((r) => r.expenseType === "Income")
-    .reduce((sum, r) => sum + Number(r.amount || 0), 0);
-  const allTimeExpenseTotal = allRows
-    .filter((r) => r.expenseType !== "Income")
-    .reduce((sum, r) => sum + Number(r.amount || 0), 0);
-  const checkingDelta = allTimeIncomeTotal - allTimeExpenseTotal;
-  balances["Wells Fargo Checking"] = (balances["Wells Fargo Checking"] ?? 0) + checkingDelta;
+  for (const row of allRows) {
+    const amount = Number(row.amount || 0);
+    if (!Number.isFinite(amount) || amount === 0) continue;
+    const accountKey = accountKeyForSheetRow(row);
+    if (balances[accountKey] === undefined) continue;
+    if (!shouldApplyByAnchor(accountKey, toDateKey(row.timestamp), anchorByAccount)) continue;
+
+    if (row.expenseType === "Income") {
+      balances[accountKey] += amount;
+    } else {
+      balances[accountKey] -= amount;
+    }
+  }
 
   const merged = { ...balances };
   for (const key of LIVE_BROKER_ACCOUNT_KEYS) {

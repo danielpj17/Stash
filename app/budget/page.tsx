@@ -13,7 +13,11 @@ import type { SheetRow } from "@/services/sheetsApi";
 import { getLatestSnaptradeBalances, refreshSnaptradeBalances } from "@/services/snaptradeApi";
 import type { SupportedBroker, RefreshSnaptradeBalancesResponse } from "@/services/snaptradeApi";
 import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
-import { computeAccountBalances } from "@/services/accountBalancesService";
+import {
+  computeAccountBalances,
+  getAccountAnchors,
+  type AccountAnchor,
+} from "@/services/accountBalancesService";
 import {
   PieChart,
   Pie,
@@ -287,6 +291,7 @@ export default function BudgetPage() {
   const [tfStatus, setTfStatus] = useState<"idle" | "submitting" | "error">("idle");
   const [tfError, setTfError] = useState("");
   const [liveBrokerBalances, setLiveBrokerBalances] = useState<Partial<Record<SupportedBroker, number>>>({});
+  const [accountAnchors, setAccountAnchors] = useState<AccountAnchor[]>([]);
   const [balancesFetchedAt, setBalancesFetchedAt] = useState<string | null>(null);
   const [balancesRefreshStatus, setBalancesRefreshStatus] = useState<"idle" | "refreshing" | "error">("idle");
   const [balancesRefreshError, setBalancesRefreshError] = useState("");
@@ -364,6 +369,22 @@ export default function BudgetPage() {
       })
       .catch(() => {
         /* keep last local values */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getAccountAnchors()
+      .then((anchors) => {
+        if (cancelled) return;
+        setAccountAnchors(anchors);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAccountAnchors([]);
       });
     return () => {
       cancelled = true;
@@ -469,8 +490,8 @@ export default function BudgetPage() {
   );
 
   const accountBalances = useMemo(() => {
-    return computeAccountBalances(allRows, allTransfers, liveBrokerBalances);
-  }, [allRows, allTransfers, liveBrokerBalances]);
+    return computeAccountBalances(allRows, allTransfers, liveBrokerBalances, accountAnchors);
+  }, [allRows, allTransfers, liveBrokerBalances, accountAnchors]);
 
   const visibleAccountBalances = useMemo(() => {
     return Object.entries(accountBalances).filter(

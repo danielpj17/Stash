@@ -15,7 +15,11 @@ import {
   refreshSnaptradeBalances,
   type RefreshSnaptradeBalancesResponse,
 } from "@/services/snaptradeApi";
-import { computeAccountBalances } from "@/services/accountBalancesService";
+import {
+  computeAccountBalances,
+  getAccountAnchors,
+  type AccountAnchor,
+} from "@/services/accountBalancesService";
 import {
   ASSET_CATEGORIES,
   LIABILITY_CATEGORIES,
@@ -224,12 +228,14 @@ export default function NetWorthPage() {
   const [latestBrokerBalances, setLatestBrokerBalances] = useState<Partial<
     Record<"Fidelity" | "Robinhood" | "Charles Schwab", number>
   >>({});
+  const [accountAnchors, setAccountAnchors] = useState<AccountAnchor[]>([]);
 
   const summaryReqRef = useRef(0);
   const tableReqRef = useRef(0);
   const historyReqRef = useRef(0);
   const investmentsReqRef = useRef(0);
   const balancesReqRef = useRef(0);
+  const anchorsReqRef = useRef(0);
 
   const filteredRows = useMemo(
     () => allRows.filter((row) => rowMatchesMonth(row, selectedMonth)),
@@ -325,8 +331,8 @@ export default function NetWorthPage() {
   }, [trendData, fidelityLatestPoint]);
 
   const accountBalances = useMemo(
-    () => computeAccountBalances(allRows, allTransfers, latestBrokerBalances),
-    [allRows, allTransfers, latestBrokerBalances]
+    () => computeAccountBalances(allRows, allTransfers, latestBrokerBalances, accountAnchors),
+    [allRows, allTransfers, latestBrokerBalances, accountAnchors]
   );
   const visibleAccountBalances = useMemo(
     () => Object.entries(accountBalances).filter(([, value]) => Math.abs(Number(value)) >= 0.005),
@@ -463,6 +469,19 @@ export default function NetWorthPage() {
     }
   }, []);
 
+  const loadAccountAnchors = useCallback(async () => {
+    const reqId = ++anchorsReqRef.current;
+    try {
+      const anchors = await getAccountAnchors();
+      if (reqId !== anchorsReqRef.current) return;
+      setAccountAnchors(anchors);
+    } catch (err) {
+      if (reqId !== anchorsReqRef.current) return;
+      console.error("Failed to load account anchors:", err);
+      setAccountAnchors([]);
+    }
+  }, []);
+
   useEffect(() => {
     loadSummary();
   }, [loadSummary]);
@@ -484,17 +503,19 @@ export default function NetWorthPage() {
         loadFidelityHistory(),
         loadInvestments(),
         loadLatestBrokerBalances(),
+        loadAccountAnchors(),
       ]);
     } finally {
       setIsRefreshing(false);
     }
-  }, [triggerRefresh, loadSummary, loadManualTables, loadFidelityHistory, loadInvestments, loadLatestBrokerBalances]);
+  }, [triggerRefresh, loadSummary, loadManualTables, loadFidelityHistory, loadInvestments, loadLatestBrokerBalances, loadAccountAnchors]);
 
   useEffect(() => {
     loadFidelityHistory();
     loadInvestments();
     loadLatestBrokerBalances();
-  }, [loadFidelityHistory, loadInvestments, loadLatestBrokerBalances]);
+    loadAccountAnchors();
+  }, [loadFidelityHistory, loadInvestments, loadLatestBrokerBalances, loadAccountAnchors]);
 
   const adjustedLiquidNetWorth = useMemo(() => {
     if (!summary) return 0;

@@ -2,7 +2,7 @@
  * Service to fetch and submit data via the app's API route (which proxies to Google Apps Script).
  * This avoids CORS / "Failed to fetch" when calling the Web App from the browser.
  *
- * Sheet columns: Timestamp, Expense Type, Amount, Description, Month
+ * Sheet columns: Timestamp, Expense Type, Amount, Description, Month, Account
  * Timestamp is set by the script on submit.
  */
 
@@ -14,16 +14,19 @@ export type SheetRow = {
   amount: number;
   description: string;
   month: string;
+  account?: string;
 };
 
 /** Normalize row keys from sheet (may be "Expense Type") to camelCase */
 function normalizeRow(raw: Record<string, unknown>): SheetRow {
+  const account = (raw.Account ?? raw.account ?? "") as string;
   return {
     timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
     expenseType: (raw["Expense Type"] ?? raw.expenseType) as string,
     amount: Number(raw.Amount ?? raw.amount ?? 0),
     description: (raw.Description ?? raw.description) as string,
     month: (raw.Month ?? raw.month) as string,
+    account: account.trim() || undefined,
   };
 }
 

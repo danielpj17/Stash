@@ -14,6 +14,18 @@ CREATE TABLE IF NOT EXISTS budget_store (
 
 INSERT INTO budget_store (id, data) VALUES (1, '{}')
 ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS processed_transactions (
+  hash TEXT PRIMARY KEY,
+  account_name TEXT,
+  processed_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS account_anchors (
+  account_name TEXT PRIMARY KEY,
+  confirmed_balance NUMERIC,
+  as_of_date DATE
+);
 ```
 
 4. Run the manual assets/liabilities setup script from `docs/neon-manual-assets-liabilities.sql` in the same SQL editor.

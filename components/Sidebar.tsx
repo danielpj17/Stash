@@ -7,6 +7,7 @@ import {
   Wallet,
   PiggyBank,
   TrendingUp,
+  ClipboardCheck,
   Menu,
 } from "lucide-react";
 import { useSidebar } from "@/contexts/SidebarContext";
@@ -17,6 +18,7 @@ const navItems = [
   { href: "/", label: "Expenses", icon: Wallet },
   { href: "/budget", label: "Budget", icon: PiggyBank },
   { href: "/net-worth", label: "Net Worth", icon: TrendingUp },
+  { href: "/reconcile", label: "Reconcile", icon: ClipboardCheck },
 ];
 
 export default function Sidebar() {
