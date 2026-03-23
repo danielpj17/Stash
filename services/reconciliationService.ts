@@ -267,6 +267,10 @@ function descriptionSimilarity(a: string, b: string): number {
   return denom > 0 ? overlap / denom : 0;
 }
 
+const MIN_FUZZY_DESCRIPTION_SIMILARITY = 0.2;
+const AUTO_MATCH_MAX_DAY_DISTANCE = 3;
+const QUESTIONABLE_MAX_DAY_DISTANCE = 14;
+
 function isLikelyTransferDescription(value: string): boolean {
   const normalized = normalizeDescriptionForMatch(value);
   return /(?:\btransfer\b|\bvenmo\b|\bzelle\b|\bpaypal\b|\bcash\s*app\b|\bpayment\b|\bdeposit\b|\bwithdrawal\b)/i
@@ -334,7 +338,7 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
  *
  * Priority:
  * 1) Exact Match: hash exists in Neon OR amount+date equals a sheet row.
- * 2) Questionable Match (Fuzzy): amount matches and date is within +/- 5 days.
+ * 2) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 14 days.
  * 3) Transfer: negative amount matched to same-day positive amount in another account.
  * 4) Unmatched.
  */
@@ -431,11 +435,12 @@ export async function findMatches(
         if (amountKey(sheetRow.amount) !== amountKey(tx.amount)) return null;
         const sheetDate = sheetRow.date ?? sheetRow.timestamp ?? "";
         const dayDistance = dateDistanceInDays(sheetDate, tx.date);
-        if (dayDistance === null || dayDistance > 5) return null;
+        if (dayDistance === null || dayDistance > QUESTIONABLE_MAX_DAY_DISTANCE) return null;
         const similarity = descriptionSimilarity(
           tx.description,
           sheetRow.description ?? "",
         );
+        if (similarity < MIN_FUZZY_DESCRIPTION_SIMILARITY) return null;
         return { index, row: sheetRow, dayDistance, similarity };
       })
       .filter(
@@ -458,8 +463,8 @@ export async function findMatches(
       const uniqueCandidate = fuzzyCandidates.length === 1;
       const shouldPromoteToAutoMatch =
         uniqueCandidate &&
-        ((bestFuzzy.dayDistance <= 2 && bestFuzzy.similarity >= 0.34) ||
-          (bestFuzzy.dayDistance <= 1 && bestFuzzy.similarity >= 0.2));
+        bestFuzzy.dayDistance <= AUTO_MATCH_MAX_DAY_DISTANCE &&
+        bestFuzzy.similarity >= MIN_FUZZY_DESCRIPTION_SIMILARITY;
 
       if (shouldPromoteToAutoMatch) {
         return {
@@ -476,7 +481,7 @@ export async function findMatches(
         bankTransaction: tx,
         matchType: "questionable_match_fuzzy",
         reason:
-          "Questionable Match (Fuzzy): amount matches and sheet date is within +/- 5 days.",
+          "Questionable Match (Fuzzy): amount/description align and sheet date is within +/- 14 days.",
         matchedSheetExpense: bestFuzzy.row,
         matchedSheetIndex: bestFuzzy.index,
       };
