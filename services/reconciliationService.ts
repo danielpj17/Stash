@@ -142,6 +142,58 @@ function isProfileConfigured(profile: BankProfile): boolean {
   );
 }
 
+function formatDateKeyFromDate(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Wells Fargo often includes "PURCHASE AUTHORIZED ON MM/DD ..." in the description.
+ * Use that embedded purchase date (when present) to reduce false fuzzy matches caused by posting-date lag.
+ */
+function deriveBankTransactionDate(
+  accountName: string,
+  postedDateRaw: string,
+  rawDescription: string,
+): string {
+  const normalizedAccount = accountName.trim().toLowerCase();
+  const isWells = normalizedAccount === "wells fargo";
+  if (!isWells) return postedDateRaw;
+
+  const match = rawDescription.match(/purchase\s+authorized\s+on\s+(\d{1,2})\/(\d{1,2})/i);
+  if (!match) return postedDateRaw;
+
+  const month = Number(match[1]);
+  const day = Number(match[2]);
+  if (!Number.isFinite(month) || !Number.isFinite(day)) return postedDateRaw;
+
+  const posted = new Date(postedDateRaw);
+  if (Number.isNaN(posted.getTime())) return postedDateRaw;
+
+  const derived = new Date(Date.UTC(posted.getUTCFullYear(), month - 1, day));
+  // If derived is implausibly in the future vs posted date, assume prior year boundary.
+  if (derived.getTime() - posted.getTime() > 7 * 86_400_000) {
+    derived.setUTCFullYear(derived.getUTCFullYear() - 1);
+  }
+  return formatDateKeyFromDate(derived);
+}
+
+function cleanBankDescription(rawDescription: string): string {
+  const cleaned = rawDescription
+    .replace(/^\s*purchase\s+authorized\s+on\s+\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\s*/i, "")
+    .replace(/\s+ref\s*#?[a-z0-9-]+/gi, "")
+    .replace(/\s+card\s+\d{2,6}\b/gi, "")
+    .replace(/\s+atm\s+id\s+\d+\b/gi, "")
+    .replace(/\s+x{3,}\d{2,}\b/gi, "")
+    .replace(/\s+[a-z]\d{8,}\b/gi, "")
+    .replace(/\s+\d{10,}\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || rawDescription.trim();
+}
+
 export function mapBankRowToTransaction(
   accountName: keyof typeof BANK_PROFILES | string,
   row: string[],
@@ -152,9 +204,11 @@ export function mapBankRowToTransaction(
   const dateIndex = profile.dateIndex as number;
   const amountIndex = profile.amountIndex as number;
   const descriptionIndex = profile.descriptionIndex as number;
-  const date = String(row[dateIndex] ?? "").trim();
+  const postedDate = String(row[dateIndex] ?? "").trim();
   const rawAmount = String(row[amountIndex] ?? "").replace(/[$,]/g, "").trim();
-  const description = String(row[descriptionIndex] ?? "").trim();
+  const rawDescription = String(row[descriptionIndex] ?? "").trim();
+  const description = cleanBankDescription(rawDescription);
+  const date = deriveBankTransactionDate(String(accountName), postedDate, rawDescription);
   const amount = Number(rawAmount);
   if (!date || !description || !Number.isFinite(amount)) return null;
 

@@ -43,7 +43,7 @@ type AnchorModalState = {
 };
 
 const ACCOUNT_OPTIONS: AccountOption[] = ["Wells Fargo", "Venmo - Daniel", "Venmo - Katie"];
-const RECONCILE_STORAGE_KEY = "reconcile-page-state-v2";
+const RECONCILE_STORAGE_KEY = "reconcile-page-state-v3";
 
 const SHEET_BASE_LINK = process.env.NEXT_PUBLIC_GOOGLE_SHEET_URL ?? "";
 
