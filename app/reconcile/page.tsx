@@ -389,8 +389,9 @@ export default function ReconcilePage() {
           throw new Error("CSV file has no data rows.");
         }
 
-        const [sheetRows, processedHashesRes] = await Promise.all([
+        const [sheetRows, sheetTransfers, processedHashesRes] = await Promise.all([
           getExpenses(),
+          getTransfers(),
           fetch("/api/reconciliation/processed", { cache: "no-store" }),
         ]);
         if (!processedHashesRes.ok) {
@@ -407,6 +408,7 @@ export default function ReconcilePage() {
             accountName: selectedAccount,
             rows: parsedRows,
             sheetExpenses: sheetRows,
+            sheetTransfers,
             processedHashes,
           }),
         });
@@ -668,6 +670,16 @@ export default function ReconcilePage() {
                               {match.matchedSheetExpense.account
                                 ? ` • ${match.matchedSheetExpense.account}`
                                 : ""}
+                            </p>
+                          )}
+                          {isMatched && !match.matchedSheetExpense && match.matchedSheetTransfer && (
+                            <p className="text-xs text-gray-500 mt-1 truncate">
+                              Transfer: {match.matchedSheetTransfer.transferFrom ?? "—"} →{" "}
+                              {match.matchedSheetTransfer.transferTo ?? "—"} •{" "}
+                              {fmtDate(
+                                match.matchedSheetTransfer.timestamp ??
+                                  match.matchedSheetTransfer.date,
+                              )}
                             </p>
                           )}
                         </div>

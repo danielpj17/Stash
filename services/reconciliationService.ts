@@ -52,6 +52,15 @@ export type SheetExpenseLike = {
   account?: string;
 };
 
+export type SheetTransferLike = {
+  amount: number;
+  timestamp?: string;
+  date?: string;
+  transferFrom?: string;
+  transferTo?: string;
+  description?: string;
+};
+
 export type MatchType =
   | "exact_match"
   | "questionable_match_fuzzy"
@@ -64,6 +73,8 @@ export type MatchResult = {
   reason: string;
   matchedSheetExpense?: SheetExpenseLike;
   matchedSheetIndex?: number;
+  matchedSheetTransfer?: SheetTransferLike;
+  matchedSheetTransferIndex?: number;
   transferCounterparty?: BankTransaction;
   matchedByNeonHash?: boolean;
 };
@@ -194,6 +205,74 @@ function cleanBankDescription(rawDescription: string): string {
   return cleaned || rawDescription.trim();
 }
 
+const DESCRIPTION_STOP_WORDS = new Set([
+  "purchase",
+  "authorized",
+  "on",
+  "payment",
+  "online",
+  "transfer",
+  "from",
+  "to",
+  "ref",
+  "card",
+  "atm",
+  "deposit",
+  "web",
+  "pmts",
+  "inc",
+  "llc",
+  "co",
+  "ut",
+  "provo",
+  "hurricane",
+  "st",
+  "saint",
+]);
+
+function normalizeDescriptionForMatch(value: string): string {
+  return cleanBankDescription(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function descriptionTokenSet(value: string): Set<string> {
+  const normalized = normalizeDescriptionForMatch(value);
+  if (!normalized) return new Set<string>();
+  const tokens = normalized
+    .split(" ")
+    .map((t) => t.trim())
+    .filter(
+      (t) =>
+        t.length >= 3 &&
+        !DESCRIPTION_STOP_WORDS.has(t) &&
+        !/^\d+$/.test(t),
+    );
+  return new Set(tokens);
+}
+
+function descriptionSimilarity(a: string, b: string): number {
+  const aTokens = descriptionTokenSet(a);
+  const bTokens = descriptionTokenSet(b);
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap += 1;
+  }
+
+  const denom = Math.max(aTokens.size, bTokens.size);
+  return denom > 0 ? overlap / denom : 0;
+}
+
+function isLikelyTransferDescription(value: string): boolean {
+  const normalized = normalizeDescriptionForMatch(value);
+  return /(?:\btransfer\b|\bvenmo\b|\bzelle\b|\bpaypal\b|\bcash\s*app\b|\bpayment\b|\bdeposit\b|\bwithdrawal\b)/i
+    .test(normalized);
+}
+
 export function mapBankRowToTransaction(
   accountName: keyof typeof BANK_PROFILES | string,
   row: string[],
@@ -262,7 +341,10 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
 export async function findMatches(
   bankTransactions: BankTransaction[],
   sheetExpenses: SheetExpenseLike[],
-  options?: { processedHashes?: Iterable<string> },
+  options?: {
+    processedHashes?: Iterable<string>;
+    sheetTransfers?: SheetTransferLike[];
+  },
 ): Promise<MatchResult[]> {
   const processedHashes = options?.processedHashes
     ? new Set(options.processedHashes)
@@ -291,22 +373,112 @@ export async function findMatches(
       };
     }
 
-    const fuzzySheetIndex = sheetExpenses.findIndex((sheetRow) => {
-      if (amountKey(sheetRow.amount) !== amountKey(tx.amount)) return false;
-      const sheetDate = sheetRow.date ?? sheetRow.timestamp ?? "";
-      const dayDistance = dateDistanceInDays(sheetDate, tx.date);
-      return dayDistance !== null && dayDistance <= 5;
-    });
-    const fuzzySheet = fuzzySheetIndex >= 0 ? sheetExpenses[fuzzySheetIndex] : undefined;
+    const sheetTransfers = options?.sheetTransfers ?? [];
+    const transferCandidates = sheetTransfers
+      .map((sheetTransfer, index) => {
+        if (amountKey(sheetTransfer.amount) !== amountKey(tx.amount)) return null;
+        const transferDate = sheetTransfer.date ?? sheetTransfer.timestamp ?? "";
+        const dayDistance = dateDistanceInDays(transferDate, tx.date);
+        if (dayDistance === null || dayDistance > 2) return null;
 
-    if (fuzzySheet) {
+        const transferText = [
+          sheetTransfer.transferFrom ?? "",
+          sheetTransfer.transferTo ?? "",
+          sheetTransfer.description ?? "",
+        ]
+          .join(" ")
+          .trim();
+        const similarity = descriptionSimilarity(tx.description, transferText);
+        const likelyTransfer =
+          isLikelyTransferDescription(tx.description) ||
+          similarity >= 0.2;
+        if (!likelyTransfer) return null;
+
+        return { index, row: sheetTransfer, dayDistance, similarity };
+      })
+      .filter(
+        (
+          candidate,
+        ): candidate is {
+          index: number;
+          row: SheetTransferLike;
+          dayDistance: number;
+          similarity: number;
+        } => candidate !== null,
+      )
+      .sort((a, b) => {
+        if (a.dayDistance !== b.dayDistance) return a.dayDistance - b.dayDistance;
+        return b.similarity - a.similarity;
+      });
+
+    const bestSheetTransfer = transferCandidates[0];
+    if (bestSheetTransfer) {
+      const uniqueTransferCandidate = transferCandidates.length === 1;
+      if (uniqueTransferCandidate) {
+        return {
+          bankTransaction: tx,
+          matchType: "transfer",
+          reason:
+            "Transfer Match: amount/date aligns with a transfer already logged in sheet.",
+          matchedSheetTransfer: bestSheetTransfer.row,
+          matchedSheetTransferIndex: bestSheetTransfer.index,
+        };
+      }
+    }
+
+    const fuzzyCandidates = sheetExpenses
+      .map((sheetRow, index) => {
+        if (amountKey(sheetRow.amount) !== amountKey(tx.amount)) return null;
+        const sheetDate = sheetRow.date ?? sheetRow.timestamp ?? "";
+        const dayDistance = dateDistanceInDays(sheetDate, tx.date);
+        if (dayDistance === null || dayDistance > 5) return null;
+        const similarity = descriptionSimilarity(
+          tx.description,
+          sheetRow.description ?? "",
+        );
+        return { index, row: sheetRow, dayDistance, similarity };
+      })
+      .filter(
+        (
+          candidate,
+        ): candidate is {
+          index: number;
+          row: SheetExpenseLike;
+          dayDistance: number;
+          similarity: number;
+        } => candidate !== null,
+      )
+      .sort((a, b) => {
+        if (a.dayDistance !== b.dayDistance) return a.dayDistance - b.dayDistance;
+        return b.similarity - a.similarity;
+      });
+
+    const bestFuzzy = fuzzyCandidates[0];
+    if (bestFuzzy) {
+      const uniqueCandidate = fuzzyCandidates.length === 1;
+      const shouldPromoteToAutoMatch =
+        uniqueCandidate &&
+        ((bestFuzzy.dayDistance <= 2 && bestFuzzy.similarity >= 0.34) ||
+          (bestFuzzy.dayDistance <= 1 && bestFuzzy.similarity >= 0.2));
+
+      if (shouldPromoteToAutoMatch) {
+        return {
+          bankTransaction: tx,
+          matchType: "exact_match",
+          reason:
+            "Auto Match: unique close-date amount match with strong description similarity.",
+          matchedSheetExpense: bestFuzzy.row,
+          matchedSheetIndex: bestFuzzy.index,
+        };
+      }
+
       return {
         bankTransaction: tx,
         matchType: "questionable_match_fuzzy",
         reason:
           "Questionable Match (Fuzzy): amount matches and sheet date is within +/- 5 days.",
-        matchedSheetExpense: fuzzySheet,
-        matchedSheetIndex: fuzzySheetIndex,
+        matchedSheetExpense: bestFuzzy.row,
+        matchedSheetIndex: bestFuzzy.index,
       };
     }
 

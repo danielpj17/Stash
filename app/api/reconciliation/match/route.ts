@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findMatches, mapBankRowsToTransactions, type SheetExpenseLike } from "@/services/reconciliationService";
+import {
+  findMatches,
+  mapBankRowsToTransactions,
+  type SheetExpenseLike,
+  type SheetTransferLike,
+} from "@/services/reconciliationService";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +23,7 @@ type MatchRequestBody = {
   accountName?: unknown;
   rows?: unknown;
   sheetExpenses?: unknown;
+  sheetTransfers?: unknown;
   processedHashes?: unknown;
 };
 
@@ -46,6 +52,22 @@ function normalizeCsvRows(value: unknown): string[][] {
     );
 }
 
+function normalizeSheetTransfers(value: unknown): SheetTransferLike[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row) => row as Record<string, unknown>)
+    .filter((row) => row && typeof row === "object")
+    .map((row) => ({
+      amount: Number(row.amount ?? 0),
+      timestamp: typeof row.timestamp === "string" ? row.timestamp : undefined,
+      date: typeof row.date === "string" ? row.date : undefined,
+      transferFrom: typeof row.transferFrom === "string" ? row.transferFrom : undefined,
+      transferTo: typeof row.transferTo === "string" ? row.transferTo : undefined,
+      description: typeof row.description === "string" ? row.description : undefined,
+    }))
+    .filter((row) => Number.isFinite(row.amount));
+}
+
 export async function POST(request: NextRequest) {
   let body: MatchRequestBody;
   try {
@@ -62,6 +84,7 @@ export async function POST(request: NextRequest) {
   const profileAccount = PROFILE_BY_ACCOUNT[accountName] ?? accountName;
   const rows = normalizeCsvRows(body.rows);
   const sheetExpenses = normalizeSheetExpenses(body.sheetExpenses);
+  const sheetTransfers = normalizeSheetTransfers(body.sheetTransfers);
   const processedHashes = Array.isArray(body.processedHashes)
     ? body.processedHashes.map((h) => String(h))
     : undefined;
@@ -71,6 +94,9 @@ export async function POST(request: NextRequest) {
     accountName,
   }));
 
-  const matches = await findMatches(bankTransactions, sheetExpenses, { processedHashes });
+  const matches = await findMatches(bankTransactions, sheetExpenses, {
+    processedHashes,
+    sheetTransfers,
+  });
   return NextResponse.json({ bankTransactions, matches });
 }
