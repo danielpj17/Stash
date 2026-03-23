@@ -37,6 +37,16 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
+function toDateString(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw.length >= 10 ? raw.slice(0, 10) : raw;
+  return parsed.toISOString().slice(0, 10);
+}
+
 function normalizeItem(raw: unknown): ManualItem | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const candidate = raw as Record<string, unknown>;
@@ -98,7 +108,7 @@ export async function GET() {
       name: String(row.name),
       value: Number(row.value),
       category: String(row.category),
-      acquisition_date: row.acquisition_date ? String(row.acquisition_date) : null,
+      acquisition_date: toDateString(row.acquisition_date),
       details:
         row.details && typeof row.details === "object" && !Array.isArray(row.details)
           ? (row.details as Record<string, unknown>)
@@ -160,7 +170,7 @@ export async function POST(request: NextRequest) {
         name: String(row.name),
         value: Number(row.value),
         category: String(row.category),
-        acquisition_date: row.acquisition_date ? String(row.acquisition_date) : null,
+        acquisition_date: toDateString(row.acquisition_date),
         details:
           row.details && typeof row.details === "object" && !Array.isArray(row.details)
             ? (row.details as Record<string, unknown>)

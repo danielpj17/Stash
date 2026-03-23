@@ -140,6 +140,17 @@ function formatDateLabel(isoDate: string): string {
   });
 }
 
+function formatAcquiredDate(dateValue?: string | null): string {
+  if (!dateValue) return "—";
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) return dateValue;
+  return parsed.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 async function fetchManualItems(url: string): Promise<ManualItem[]> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
@@ -719,7 +730,7 @@ export default function NetWorthPage() {
                       <tr key={row.id} className="border-b border-charcoal-dark/80 odd:bg-[#2C2C2C]">
                         <td className="py-2 pr-2">{row.name}</td>
                         <td className="py-2 pr-2">{row.category}</td>
-                        <td className="py-2 pr-2">{row.acquisition_date || "—"}</td>
+                        <td className="py-2 pr-2">{formatAcquiredDate(row.acquisition_date)}</td>
                         <td className="py-2 pr-2 text-right">{fmtCurrency(Number(row.value || 0))}</td>
                         <td className="py-2 text-right">
                           <button
