@@ -574,6 +574,21 @@ export default function ReconcilePage() {
                                   : ""}
                               </p>
                             </>
+                          ) : match.matchType === "questionable_match_fuzzy" && match.matchedSheetTransfer ? (
+                            <>
+                              <p className="text-yellow-300 text-sm truncate">
+                                {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                {(match.matchedSheetTransfer.transferTo ?? "—")}
+                              </p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                Transfer •{" "}
+                                {fmtDate(
+                                  match.matchedSheetTransfer.timestamp ??
+                                    match.matchedSheetTransfer.date,
+                                )}{" "}
+                                • {fmtMoney(match.matchedSheetTransfer.amount)}
+                              </p>
+                            </>
                           ) : (
                             <p className="text-xs text-gray-500">No candidate match</p>
                           )}

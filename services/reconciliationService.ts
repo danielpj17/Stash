@@ -274,7 +274,7 @@ const TRANSFER_CANDIDATE_MAX_DAY_DISTANCE = 31;
 
 function isLikelyTransferDescription(value: string): boolean {
   const normalized = normalizeDescriptionForMatch(value);
-  return /(?:\btransfer\b|\bvenmo\b|\bzelle\b|\bpaypal\b|\bcash\s*app\b|\bpayment\b|\bdeposit\b|\bwithdrawal\b)/i
+  return /(?:\btransfer\b|\bvenmo\b|\bcashout\b|\bzelle\b|\bpaypal\b|\bcash\s*app\b|\bpayment\b|\bcardpmt\b|\bcrcardpmt\b|\bautopay\b|\bdeposit\b|\bwithdrawal\b)/
     .test(normalized);
 }
 
@@ -340,7 +340,7 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
  * Priority:
  * 1) Exact Match: hash exists in Neon OR amount+date equals a sheet row.
  * 2) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 31 days.
- * 3) Transfer: negative amount matched to same-day positive amount in another account.
+ * 3) Transfer: amount/date aligns with transfer rows or opposing bank transaction.
  * 4) Unmatched.
  */
 export async function findMatches(
@@ -396,7 +396,8 @@ export async function findMatches(
         const similarity = descriptionSimilarity(tx.description, transferText);
         const likelyTransfer =
           isLikelyTransferDescription(tx.description) ||
-          similarity >= 0.2;
+          isLikelyTransferDescription(transferText) ||
+          similarity >= 0.12;
         if (!likelyTransfer) return null;
 
         return { index, row: sheetTransfer, dayDistance, similarity };
@@ -429,6 +430,15 @@ export async function findMatches(
           matchedSheetTransferIndex: bestSheetTransfer.index,
         };
       }
+
+      return {
+        bankTransaction: tx,
+        matchType: "questionable_match_fuzzy",
+        reason:
+          "Questionable Transfer Match: multiple transfer-sheet candidates share the same amount/date window.",
+        matchedSheetTransfer: bestSheetTransfer.row,
+        matchedSheetTransferIndex: bestSheetTransfer.index,
+      };
     }
 
     const fuzzyCandidates = sheetExpenses
