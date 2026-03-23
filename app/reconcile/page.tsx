@@ -43,7 +43,7 @@ type AnchorModalState = {
 };
 
 const ACCOUNT_OPTIONS: AccountOption[] = ["Wells Fargo", "Venmo - Daniel", "Venmo - Katie"];
-const RECONCILE_STORAGE_KEY = "reconcile-page-state-v1";
+const RECONCILE_STORAGE_KEY = "reconcile-page-state-v2";
 
 const SHEET_BASE_LINK = process.env.NEXT_PUBLIC_GOOGLE_SHEET_URL ?? "";
 
@@ -625,7 +625,10 @@ export default function ReconcilePage() {
                 {activeMatches.map((match, index) => {
                   const tx = match.bankTransaction;
                   const id = idForTx(tx);
-                  const isMatched = match.matchType === "exact_match" || approvedIds.has(id);
+                  const isAutoMatched =
+                    match.matchType !== "unmatched" &&
+                    match.matchType !== "questionable_match_fuzzy";
+                  const isMatched = isAutoMatched || approvedIds.has(id);
                   const isManualOnly = match.matchType === "unmatched" || dismissedIds.has(id);
                   const link = buildSheetLink(match.matchedSheetIndex);
                   return (
@@ -639,6 +642,15 @@ export default function ReconcilePage() {
                           <p className="text-xs text-gray-400 mt-0.5">
                             {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                           </p>
+                          {isMatched && match.matchedSheetExpense && (
+                            <p className="text-xs text-gray-500 mt-1 truncate">
+                              Sheet: {match.matchedSheetExpense.expenseType ?? "—"} •{" "}
+                              {match.matchedSheetExpense.description ?? "—"}
+                              {match.matchedSheetExpense.account
+                                ? ` • ${match.matchedSheetExpense.account}`
+                                : ""}
+                            </p>
+                          )}
                         </div>
                         <div className="text-right shrink-0">
                           {isMatched ? (

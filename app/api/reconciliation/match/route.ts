@@ -31,6 +31,8 @@ function normalizeSheetExpenses(value: unknown): SheetExpenseLike[] {
       timestamp: typeof row.timestamp === "string" ? row.timestamp : undefined,
       date: typeof row.date === "string" ? row.date : undefined,
       description: typeof row.description === "string" ? row.description : undefined,
+      expenseType: typeof row.expenseType === "string" ? row.expenseType : undefined,
+      account: typeof row.account === "string" ? row.account : undefined,
     }))
     .filter((row) => Number.isFinite(row.amount));
 }

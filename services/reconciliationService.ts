@@ -48,6 +48,8 @@ export type SheetExpenseLike = {
   timestamp?: string;
   date?: string;
   description?: string;
+  expenseType?: string;
+  account?: string;
 };
 
 export type MatchType =
@@ -87,6 +89,10 @@ function cents(amount: number): number {
   return Math.round(Number(amount) * 100);
 }
 
+function amountKey(amount: number): number {
+  return Math.abs(cents(amount));
+}
+
 function normalizeDateOnly(value: string): string {
   const raw = String(value).trim();
   if (!raw) return "";
@@ -119,7 +125,7 @@ function dateDistanceInDays(a: string, b: string): number | null {
 function toIndexedMap(rows: SheetExpenseLike[]): Map<string, SheetExpenseLike[]> {
   const indexed = new Map<string, SheetExpenseLike[]>();
   for (const row of rows) {
-    const key = `${cents(row.amount)}|${normalizeDateOnly(
+    const key = `${amountKey(row.amount)}|${normalizeDateOnly(
       row.date ?? row.timestamp ?? "",
     )}`;
     if (!indexed.has(key)) indexed.set(key, []);
@@ -211,7 +217,7 @@ export async function findMatches(
 
   return bankTransactions.map((tx) => {
     const txDate = normalizeDateOnly(tx.date);
-    const exactKey = `${cents(tx.amount)}|${txDate}`;
+    const exactKey = `${amountKey(tx.amount)}|${txDate}`;
     const exactSheet = exactSheetIndex.get(exactKey)?.[0];
     const exactSheetIndexValue = exactSheet
       ? sheetExpenses.findIndex((row) => row === exactSheet)
@@ -232,7 +238,7 @@ export async function findMatches(
     }
 
     const fuzzySheetIndex = sheetExpenses.findIndex((sheetRow) => {
-      if (cents(sheetRow.amount) !== cents(tx.amount)) return false;
+      if (amountKey(sheetRow.amount) !== amountKey(tx.amount)) return false;
       const sheetDate = sheetRow.date ?? sheetRow.timestamp ?? "";
       const dayDistance = dateDistanceInDays(sheetDate, tx.date);
       return dayDistance !== null && dayDistance <= 5;
