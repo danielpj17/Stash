@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
@@ -43,6 +43,7 @@ type AnchorModalState = {
 };
 
 const ACCOUNT_OPTIONS: AccountOption[] = ["Wells Fargo", "Venmo - Daniel", "Venmo - Katie"];
+const RECONCILE_STORAGE_KEY = "reconcile-page-state-v1";
 
 const SHEET_BASE_LINK = process.env.NEXT_PUBLIC_GOOGLE_SHEET_URL ?? "";
 
@@ -119,6 +120,62 @@ export default function ReconcilePage() {
     saving: false,
     error: "",
   });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(RECONCILE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        selectedAccount?: string;
+        activeTab?: string;
+        matchesByAccount?: Record<string, MatchResult[]>;
+        dismissedIds?: string[];
+        approvedIds?: string[];
+      };
+
+      if (
+        parsed.selectedAccount &&
+        ACCOUNT_OPTIONS.includes(parsed.selectedAccount as AccountOption)
+      ) {
+        setSelectedAccount(parsed.selectedAccount as AccountOption);
+      }
+      if (typeof parsed.activeTab === "string" && parsed.activeTab.trim()) {
+        setActiveTab(parsed.activeTab);
+      }
+      if (
+        parsed.matchesByAccount &&
+        typeof parsed.matchesByAccount === "object" &&
+        !Array.isArray(parsed.matchesByAccount)
+      ) {
+        setMatchesByAccount(parsed.matchesByAccount);
+      }
+      if (Array.isArray(parsed.dismissedIds)) {
+        setDismissedIds(new Set(parsed.dismissedIds.map((id) => String(id))));
+      }
+      if (Array.isArray(parsed.approvedIds)) {
+        setApprovedIds(new Set(parsed.approvedIds.map((id) => String(id))));
+      }
+    } catch {
+      // Ignore corrupted local storage and continue with empty in-memory state.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const payload = {
+      selectedAccount,
+      activeTab,
+      matchesByAccount,
+      dismissedIds: Array.from(dismissedIds),
+      approvedIds: Array.from(approvedIds),
+    };
+    try {
+      window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage quota/security errors; page still works in-memory.
+    }
+  }, [activeTab, approvedIds, dismissedIds, matchesByAccount, selectedAccount]);
 
   const allMatches = useMemo(
     () => Object.values(matchesByAccount).flat(),
@@ -358,11 +415,42 @@ export default function ReconcilePage() {
           throw new Error(err.error || `Failed to match CSV (${res.status})`);
         }
         const data = (await res.json()) as MatchResponse;
+        const autoApprovable = data.matches.filter(
+          (match) =>
+            match.matchType !== "unmatched" &&
+            match.matchType !== "questionable_match_fuzzy",
+        );
+        const autoApprovedIds: string[] = [];
+        const autoApprovalErrors: string[] = [];
+        await Promise.all(
+          autoApprovable.map(async (match) => {
+            try {
+              await persistProcessedHash(match.bankTransaction);
+              autoApprovedIds.push(idForTx(match.bankTransaction));
+            } catch (err) {
+              autoApprovalErrors.push(
+                err instanceof Error
+                  ? err.message
+                  : `Failed to auto-approve ${match.bankTransaction.description || "transaction"}.`,
+              );
+            }
+          }),
+        );
 
         setMatchesByAccount((prev) => ({
           ...prev,
           [selectedAccount]: data.matches,
         }));
+        if (autoApprovedIds.length > 0) {
+          setApprovedIds((prev) => {
+            const next = new Set(prev);
+            autoApprovedIds.forEach((id) => next.add(id));
+            return next;
+          });
+        }
+        if (autoApprovalErrors.length > 0) {
+          setActionError(autoApprovalErrors[0]);
+        }
         setActiveTab(selectedAccount);
       } catch (err) {
         setUploadError(err instanceof Error ? err.message : "Upload failed.");
@@ -370,7 +458,7 @@ export default function ReconcilePage() {
         setIsUploading(false);
       }
     },
-    [selectedAccount],
+    [persistProcessedHash, selectedAccount],
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
