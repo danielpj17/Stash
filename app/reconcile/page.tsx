@@ -115,6 +115,7 @@ const ACCOUNT_OPTIONS: AccountOption[] = [
   "America First",
   "Ally",
 ];
+const ALL_ACCOUNTS_OPTION = "All";
 const CSV_PARSER_READY_ACCOUNTS = new Set<AccountOption>([
   "WF Checking",
   "WF Savings",
@@ -999,14 +1000,21 @@ export default function ReconcilePage() {
             </button>
             <label className="text-sm text-gray-300">Account</label>
             <select
-              value={selectedAccount}
+              value={viewMode === "home" ? ALL_ACCOUNTS_OPTION : selectedAccount}
               onChange={(e) => {
-                const account = e.target.value as AccountOption;
+                const nextValue = e.target.value;
+                if (nextValue === ALL_ACCOUNTS_OPTION) {
+                  setViewMode("home");
+                  return;
+                }
+                const account = nextValue as AccountOption;
                 setSelectedAccount(account);
                 setActiveTab(account);
+                setViewMode("accountDetail");
               }}
               className="px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
             >
+              <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
               {ACCOUNT_OPTIONS.map((account) => (
                 <option key={account} value={account}>
                   {account}
