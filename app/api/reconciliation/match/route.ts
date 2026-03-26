@@ -28,6 +28,25 @@ type MatchRequestBody = {
   processedHashes?: unknown;
 };
 
+function readStringFieldCaseInsensitive(
+  row: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string") return value;
+  }
+  const normalized = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(row)) {
+    normalized.set(k.trim().toLowerCase(), v);
+  }
+  for (const key of keys) {
+    const value = normalized.get(key.trim().toLowerCase());
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
 function normalizeSheetExpenses(value: unknown): SheetExpenseLike[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -40,12 +59,7 @@ function normalizeSheetExpenses(value: unknown): SheetExpenseLike[] {
       description: typeof row.description === "string" ? row.description : undefined,
       expenseType: typeof row.expenseType === "string" ? row.expenseType : undefined,
       account: typeof row.account === "string" ? row.account : undefined,
-      rowId:
-        typeof row.rowId === "string"
-          ? row.rowId
-          : typeof row["Row ID"] === "string"
-            ? (row["Row ID"] as string)
-            : undefined,
+      rowId: readStringFieldCaseInsensitive(row, ["rowId", "Row ID", "row id", "row_id", "Row Id"]),
     }))
     .filter((row) => Number.isFinite(row.amount));
 }
@@ -71,12 +85,13 @@ function normalizeSheetTransfers(value: unknown): SheetTransferLike[] {
       transferFrom: typeof row.transferFrom === "string" ? row.transferFrom : undefined,
       transferTo: typeof row.transferTo === "string" ? row.transferTo : undefined,
       description: typeof row.description === "string" ? row.description : undefined,
-      transferRowId:
-        typeof row.transferRowId === "string"
-          ? row.transferRowId
-          : typeof row["Transfer Row ID"] === "string"
-            ? (row["Transfer Row ID"] as string)
-            : undefined,
+      transferRowId: readStringFieldCaseInsensitive(row, [
+        "transferRowId",
+        "Transfer Row ID",
+        "transfer row id",
+        "transfer_row_id",
+        "Transfer Row Id",
+      ]),
     }))
     .filter((row) => Number.isFinite(row.amount));
 }

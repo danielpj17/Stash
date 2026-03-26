@@ -19,17 +19,32 @@ export type SheetRow = {
   rowId?: string;
 };
 
+function getRawValue(raw: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (raw[key] !== undefined) return raw[key];
+  }
+  const normalized = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(raw)) {
+    normalized.set(k.trim().toLowerCase(), v);
+  }
+  for (const key of keys) {
+    const value = normalized.get(key.trim().toLowerCase());
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
 /** Normalize row keys from sheet (may be "Expense Type") to camelCase */
 function normalizeRow(raw: Record<string, unknown>): SheetRow {
-  const account = (raw.Account ?? raw.account ?? "") as string;
-  const rowIdRaw = raw["Row ID"] ?? raw.rowId ?? raw.row_id;
+  const account = String(getRawValue(raw, ["Account", "account"]) ?? "");
+  const rowIdRaw = getRawValue(raw, ["Row ID", "row id", "rowId", "row_id", "Row Id"]);
   const rowId = typeof rowIdRaw === "string" ? rowIdRaw.trim() : "";
   return {
-    timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
-    expenseType: (raw["Expense Type"] ?? raw.expenseType) as string,
-    amount: Number(raw.Amount ?? raw.amount ?? 0),
-    description: (raw.Description ?? raw.description) as string,
-    month: (raw.Month ?? raw.month) as string,
+    timestamp: (getRawValue(raw, ["Timestamp", "timestamp"]) as string | undefined),
+    expenseType: String(getRawValue(raw, ["Expense Type", "expenseType", "expense type"]) ?? ""),
+    amount: Number(getRawValue(raw, ["Amount", "amount"]) ?? 0),
+    description: String(getRawValue(raw, ["Description", "description"]) ?? ""),
+    month: String(getRawValue(raw, ["Month", "month"]) ?? ""),
     account: account.trim() || undefined,
     rowId: rowId || undefined,
   };
@@ -140,22 +155,34 @@ export type TransferRow = {
 };
 
 function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
-  const transferTo =
-    (raw["Transfer To"] ?? raw.transferTo ?? "") as string;
-  const transferRowIdRaw = raw["Transfer Row ID"] ?? raw.transferRowId ?? raw.transfer_row_id;
+  const transferTo = String(getRawValue(raw, ["Transfer To", "transferTo", "transfer to"]) ?? "");
+  const transferRowIdRaw = getRawValue(raw, [
+    "Transfer Row ID",
+    "transfer row id",
+    "transferRowId",
+    "transfer_row_id",
+    "Transfer Row Id",
+  ]);
   const transferRowId = typeof transferRowIdRaw === "string" ? transferRowIdRaw.trim() : "";
   return {
-    timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
-    transferFrom: (raw["Transfer from"] ?? raw["Transfer From"] ?? raw.transferFrom ?? "") as string,
+    timestamp: (getRawValue(raw, ["Timestamp", "timestamp"]) as string | undefined),
+    transferFrom: String(
+      getRawValue(raw, ["Transfer from", "Transfer From", "transferFrom", "transfer from"]) ?? ""
+    ),
     transferTo,
-    amount: Number(raw["Transfer Amount"] ?? raw.amount ?? 0),
+    amount: Number(getRawValue(raw, ["Transfer Amount", "transfer amount", "amount"]) ?? 0),
     transferRowId: transferRowId || undefined,
     description: (() => {
-      const d = raw["Transfer Description"] ?? raw["Transfer Descriptior"] ?? raw.description;
+      const d = getRawValue(raw, [
+        "Transfer Description",
+        "Transfer Descriptior",
+        "transfer description",
+        "description",
+      ]);
       const s = typeof d === "string" ? d.trim() : "";
       return s || undefined;
     })(),
-    month: (raw.Month ?? raw.month ?? "") as string,
+    month: String(getRawValue(raw, ["Month", "month"]) ?? ""),
   };
 }
 
