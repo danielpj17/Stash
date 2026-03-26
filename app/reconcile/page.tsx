@@ -285,37 +285,56 @@ export default function ReconcilePage() {
     setQuickAdd((prev) => ({ ...prev, open: false, rowId: null, error: "", submitting: false }));
   }, []);
 
-  const openSplitModal = useCallback((match: MatchResult) => {
+  const openSplitModal = useCallback(async (match: MatchResult) => {
     const tx = match.bankTransaction;
-    const availableCandidates = sheetExpenses
-      .filter((row) => {
-        const rowId = (row.rowId ?? "").trim();
-        if (!rowId) return false;
-        return !claimedRowKeys.has(claimKey("Expenses", rowId));
-      })
-      .map((row) => {
-        const rowId = (row.rowId ?? "").trim();
-        return {
-          key: claimKey("Expenses", rowId),
-          sheetName: "Expenses" as const,
-          rowId,
-          amount: Math.abs(Number(row.amount)),
-          expenseType: row.expenseType,
-          description: row.description,
-          timestamp: row.timestamp,
-          account: row.account,
-        };
-      });
+    setActionError("");
+    try {
+      const [freshSheetRows, claimsRes] = await Promise.all([
+        getExpenses(),
+        fetch("/api/reconciliation/claims", { cache: "no-store" }),
+      ]);
+      if (!claimsRes.ok) {
+        const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
+        throw new Error(err.error || "Failed to load claimed sheet rows.");
+      }
+      const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+      const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
 
-    setSplitModal({
-      open: true,
-      rowId: idForTx(tx),
-      selectedKeys: [],
-      candidates: availableCandidates,
-      submitting: false,
-      error: "",
-    });
-  }, [claimedRowKeys, sheetExpenses]);
+      setSheetExpenses(freshSheetRows);
+      setClaimedRowKeys(claimedRows);
+
+      const availableCandidates = freshSheetRows
+        .filter((row) => {
+          const rowId = (row.rowId ?? "").trim();
+          if (!rowId) return false;
+          return !claimedRows.has(claimKey("Expenses", rowId));
+        })
+        .map((row) => {
+          const rowId = (row.rowId ?? "").trim();
+          return {
+            key: claimKey("Expenses", rowId),
+            sheetName: "Expenses" as const,
+            rowId,
+            amount: Math.abs(Number(row.amount)),
+            expenseType: row.expenseType,
+            description: row.description,
+            timestamp: row.timestamp,
+            account: row.account,
+          };
+        });
+
+      setSplitModal({
+        open: true,
+        rowId: idForTx(tx),
+        selectedKeys: [],
+        candidates: availableCandidates,
+        submitting: false,
+        error: "",
+      });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to open claim modal.");
+    }
+  }, []);
 
   const closeSplitModal = useCallback(() => {
     setSplitModal({
