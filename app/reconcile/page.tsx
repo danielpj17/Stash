@@ -358,7 +358,9 @@ export default function ReconcilePage() {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = sortByNewestDate(
-        matchesByAccount[account] ?? [],
+        (matchesByAccount[account] ?? []).filter(
+          (row) => row.bankTransaction.accountName === account,
+        ),
         (row) => row.bankTransaction.date,
       );
     });
@@ -975,8 +977,12 @@ export default function ReconcilePage() {
     accept: { "text/csv": [".csv"] },
   });
 
-  const activeReviewRows = statementReviewRowsByAccount[activeTab] ?? [];
-  const activeCompletedRows = statementCompletedRowsByAccount[activeTab] ?? [];
+  const activeReviewRows = (statementReviewRowsByAccount[activeTab] ?? []).filter(
+    (row) => row.bankTransaction.accountName === activeTab,
+  );
+  const activeCompletedRows = (statementCompletedRowsByAccount[activeTab] ?? []).filter(
+    (row) => row.bankTransaction.accountName === activeTab,
+  );
 
   return (
     <DashboardLayout>
@@ -1010,34 +1016,36 @@ export default function ReconcilePage() {
           </div>
         </div>
 
-        <div
-          {...getRootProps()}
-          className={`rounded-xl border border-dashed p-6 text-center cursor-pointer transition-colors ${
-            isDragActive
-              ? "border-accent bg-accent/10"
-              : "border-charcoal-dark bg-[#252525] hover:border-accent/70 hover:bg-[#2a2a2a]"
-          }`}
-        >
-          <input {...getInputProps()} />
-          <Upload className="mx-auto mb-2 text-gray-400" />
-          <p className="text-gray-200 text-sm">
-            {isDragActive ? "Drop the CSV here..." : "Drop a CSV here, or click to upload"}
-          </p>
-          <p className="text-xs text-gray-500 mt-1">
-            Account profile: <span className="text-gray-300">{selectedAccount}</span>
-          </p>
-          {!accountHasConfiguredParser(selectedAccount) && (
-            <p className="text-xs text-yellow-300/90 mt-1">
-              CSV parser not configured yet for this account. Upload may return no transactions.
+        {viewMode === "accountDetail" && (
+          <div
+            {...getRootProps()}
+            className={`rounded-xl border border-dashed p-6 text-center cursor-pointer transition-colors ${
+              isDragActive
+                ? "border-accent bg-accent/10"
+                : "border-charcoal-dark bg-[#252525] hover:border-accent/70 hover:bg-[#2a2a2a]"
+            }`}
+          >
+            <input {...getInputProps()} />
+            <Upload className="mx-auto mb-2 text-gray-400" />
+            <p className="text-gray-200 text-sm">
+              {isDragActive ? "Drop the CSV here..." : "Drop a CSV here, or click to upload"}
             </p>
-          )}
-          {isUploading && (
-            <div className="mt-2 inline-flex items-center gap-2 text-sm text-gray-300">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Processing...
-            </div>
-          )}
-        </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Account profile: <span className="text-gray-300">{selectedAccount}</span>
+            </p>
+            {!accountHasConfiguredParser(selectedAccount) && (
+              <p className="text-xs text-yellow-300/90 mt-1">
+                CSV parser not configured yet for this account. Upload may return no transactions.
+              </p>
+            )}
+            {isUploading && (
+              <div className="mt-2 inline-flex items-center gap-2 text-sm text-gray-300">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Processing...
+              </div>
+            )}
+          </div>
+        )}
 
         {(uploadError || actionError) && (
           <div className="rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-2 text-sm">
