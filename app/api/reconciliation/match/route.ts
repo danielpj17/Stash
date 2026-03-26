@@ -12,12 +12,17 @@ export const dynamic = "force-dynamic";
 
 const PROFILE_BY_ACCOUNT: Record<string, string> = {
   "Wells Fargo": "Wells Fargo",
+  "WF Checking": "Wells Fargo",
+  "WF Savings": "Wells Fargo",
+  Fidelity: "Fidelity",
   "Venmo - Daniel": "Venmo",
   "Venmo - Katie": "Venmo",
   Venmo: "Venmo",
   "Capital One": "Capital One",
   "America First": "America First",
   Discover: "Discover",
+  Schwab: "Charles Schwab",
+  Ally: "Ally",
 };
 
 type MatchRequestBody = {
