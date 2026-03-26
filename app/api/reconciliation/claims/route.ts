@@ -32,7 +32,7 @@ function toCents(value: number): number {
   return Math.round(value * 100);
 }
 
-async function ensureClaimsTable(sql: ReturnType<typeof neon>) {
+async function ensureClaimsTable(sql: any) {
   await sql`
     CREATE TABLE IF NOT EXISTS reconciliation_claim_links (
       bank_hash TEXT NOT NULL,

@@ -32,7 +32,7 @@ function normalizeExpectedLegs(value: unknown): 1 | 2 {
   return parsed === 1 ? 1 : 2;
 }
 
-async function ensureTransferClaimsTable(sql: ReturnType<typeof neon>) {
+async function ensureTransferClaimsTable(sql: any) {
   await sql`
     CREATE TABLE IF NOT EXISTS reconciliation_transfer_claim_links (
       transfer_sheet_row_id TEXT NOT NULL,
