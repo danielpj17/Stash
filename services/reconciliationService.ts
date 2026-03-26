@@ -50,6 +50,7 @@ export type SheetExpenseLike = {
   description?: string;
   expenseType?: string;
   account?: string;
+  rowId?: string;
 };
 
 export type SheetTransferLike = {
@@ -59,6 +60,15 @@ export type SheetTransferLike = {
   transferFrom?: string;
   transferTo?: string;
   description?: string;
+  transferRowId?: string;
+};
+
+type TransferClaimStatus = {
+  claimedCount: number;
+  expectedLegs: number;
+  isComplete: boolean;
+  hasPositive: boolean;
+  hasNegative: boolean;
 };
 
 export type MatchType =
@@ -349,6 +359,7 @@ export async function findMatches(
   options?: {
     processedHashes?: Iterable<string>;
     sheetTransfers?: SheetTransferLike[];
+    transferClaimStatusByRowId?: Record<string, TransferClaimStatus>;
   },
 ): Promise<MatchResult[]> {
   const processedHashes = options?.processedHashes
@@ -379,9 +390,20 @@ export async function findMatches(
     }
 
     const sheetTransfers = options?.sheetTransfers ?? [];
+    const transferClaimStatusByRowId = options?.transferClaimStatusByRowId ?? {};
     const transferCandidates = sheetTransfers
       .map((sheetTransfer, index) => {
         if (amountKey(sheetTransfer.amount) !== amountKey(tx.amount)) return null;
+        const transferRowId = String(sheetTransfer.transferRowId ?? "").trim();
+        const claimStatus = transferRowId ? transferClaimStatusByRowId[transferRowId] : undefined;
+        if (claimStatus?.isComplete) return null;
+
+        const txSign = cents(tx.amount) >= 0 ? 1 : -1;
+        if (claimStatus && claimStatus.expectedLegs === 2) {
+          const hasSameSignClaim = txSign > 0 ? claimStatus.hasPositive : claimStatus.hasNegative;
+          if (hasSameSignClaim) return null;
+        }
+
         const transferDate = sheetTransfer.date ?? sheetTransfer.timestamp ?? "";
         const dayDistance = dateDistanceInDays(transferDate, tx.date);
         if (dayDistance === null || dayDistance > TRANSFER_CANDIDATE_MAX_DAY_DISTANCE) return null;

@@ -14,10 +14,20 @@ A responsive financial dashboard built with **Next.js 14**, **Tailwind CSS**, an
 
 ## Google Sheets backend
 
-1. Create a Google Sheet with row 1 headers: **Timestamp**, **Expense Type**, **Amount**, **Description**, **Month**.
+1. Create two tabs:
+   - **Expenses** headers: **Timestamp**, **Expense Type**, **Amount**, **Description**, **Month**, **Row ID**
+   - **Transfers** headers: **Timestamp**, **Transfer from**, **Transfer To**, **Transfer Amount**, **Month**, **Transfer Row ID**
 2. Use the sample script in `docs/google-apps-script-sample.js`: Extensions → Apps Script, paste the code, then Deploy → New deployment → Web app. Copy the Web App URL.
 3. Create `.env.local` from `.env.example` and set `NEXT_PUBLIC_GOOGLE_APPS_SCRIPT_URL` to that URL.
 4. Restart the dev server. The Expenses page will load data from the sheet; the New Expense form will append rows (Timestamp is set by the script).
+
+For reconciliation claim-linking, each expense row must have a stable **Row ID**:
+- new rows created via the sample script will get a UUID automatically
+- older rows should be backfilled once manually in the sheet
+
+For transfer leg claiming, each transfer row must have a stable **Transfer Row ID**:
+- new rows created via the sample script will get a UUID automatically
+- older transfer rows should be backfilled once manually in the sheet
 
 ## Getting started
 

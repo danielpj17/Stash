@@ -6,7 +6,7 @@ import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
 import { Check, Loader2, PlusCircle, Upload, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
-import { getExpenses, getTransfers, submitExpense } from "@/services/sheetsApi";
+import { getExpenses, getTransfers, submitExpense, type SheetRow } from "@/services/sheetsApi";
 import { EXPENSE_TYPE_OPTIONS } from "@/lib/constants";
 import { getLatestSnaptradeBalances } from "@/services/snaptradeApi";
 import type { BankTransaction, MatchResult } from "@/services/reconciliationService";
@@ -33,6 +33,39 @@ type QuickAddState = {
   error: string;
 };
 
+type SplitDraftLine = {
+  key: string;
+  sheetName: "Expenses";
+  rowId: string;
+  amount: number;
+  expenseType: string;
+  description: string;
+  timestamp?: string;
+  account?: string;
+};
+
+type SplitModalState = {
+  open: boolean;
+  rowId: string | null;
+  selectedKeys: string[];
+  candidates: SplitDraftLine[];
+  submitting: boolean;
+  error: string;
+};
+
+type TransferClaimModalState = {
+  open: boolean;
+  rowId: string | null;
+  expectedLegs: 1 | 2;
+  submitting: boolean;
+  error: string;
+};
+
+type TransferClaimStatusByRowId = Record<
+  string,
+  { claimedCount: number; expectedLegs: number; isComplete: boolean }
+>;
+
 type AnchorModalState = {
   open: boolean;
   date: string;
@@ -46,6 +79,10 @@ const ACCOUNT_OPTIONS: AccountOption[] = ["Wells Fargo", "Venmo - Daniel", "Venm
 const RECONCILE_STORAGE_KEY = "reconcile-page-state-v3";
 
 const SHEET_BASE_LINK = process.env.NEXT_PUBLIC_GOOGLE_SHEET_URL ?? "";
+
+function claimKey(sheetName: string, rowId: string): string {
+  return `${sheetName}:${rowId}`;
+}
 
 function idForTx(tx: BankTransaction): string {
   return `${tx.accountName}|${tx.hash}`;
@@ -65,6 +102,10 @@ function fmtDate(raw?: string): string {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return raw;
   return d.toLocaleDateString("en-US");
+}
+
+function toCents(value: number): number {
+  return Math.round(value * 100);
 }
 
 function buildSheetLink(index?: number): string | null {
@@ -103,12 +144,31 @@ export default function ReconcilePage() {
   const [approvedIds, setApprovedIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState("");
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [sheetExpenses, setSheetExpenses] = useState<SheetRow[]>([]);
+  const [claimedRowKeys, setClaimedRowKeys] = useState<Set<string>>(new Set());
+  const [transferClaimStatusByRowId, setTransferClaimStatusByRowId] =
+    useState<TransferClaimStatusByRowId>({});
   const [quickAdd, setQuickAdd] = useState<QuickAddState>({
     open: false,
     rowId: null,
     expenseType: "Misc.",
     amount: "",
     description: "",
+    submitting: false,
+    error: "",
+  });
+  const [splitModal, setSplitModal] = useState<SplitModalState>({
+    open: false,
+    rowId: null,
+    selectedKeys: [],
+    candidates: [],
+    submitting: false,
+    error: "",
+  });
+  const [transferClaimModal, setTransferClaimModal] = useState<TransferClaimModalState>({
+    open: false,
+    rowId: null,
+    expectedLegs: 2,
     submitting: false,
     error: "",
   });
@@ -187,7 +247,11 @@ export default function ReconcilePage() {
       allMatches.filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (dismissedIds.has(id) || approvedIds.has(id)) return false;
-        return match.matchType === "unmatched" || match.matchType === "questionable_match_fuzzy";
+        return (
+          match.matchType === "unmatched" ||
+          match.matchType === "questionable_match_fuzzy" ||
+          match.matchType === "transfer"
+        );
       }),
     [allMatches, dismissedIds, approvedIds],
   );
@@ -219,6 +283,73 @@ export default function ReconcilePage() {
 
   const closeQuickAdd = useCallback(() => {
     setQuickAdd((prev) => ({ ...prev, open: false, rowId: null, error: "", submitting: false }));
+  }, []);
+
+  const openSplitModal = useCallback((match: MatchResult) => {
+    const tx = match.bankTransaction;
+    const availableCandidates = sheetExpenses
+      .filter((row) => {
+        const rowId = (row.rowId ?? "").trim();
+        if (!rowId) return false;
+        return !claimedRowKeys.has(claimKey("Expenses", rowId));
+      })
+      .map((row) => {
+        const rowId = (row.rowId ?? "").trim();
+        return {
+          key: claimKey("Expenses", rowId),
+          sheetName: "Expenses" as const,
+          rowId,
+          amount: Math.abs(Number(row.amount)),
+          expenseType: row.expenseType,
+          description: row.description,
+          timestamp: row.timestamp,
+          account: row.account,
+        };
+      });
+
+    setSplitModal({
+      open: true,
+      rowId: idForTx(tx),
+      selectedKeys: [],
+      candidates: availableCandidates,
+      submitting: false,
+      error: "",
+    });
+  }, [claimedRowKeys, sheetExpenses]);
+
+  const closeSplitModal = useCallback(() => {
+    setSplitModal({
+      open: false,
+      rowId: null,
+      selectedKeys: [],
+      candidates: [],
+      submitting: false,
+      error: "",
+    });
+  }, []);
+
+  const openTransferClaimModal = useCallback((match: MatchResult) => {
+    const tx = match.bankTransaction;
+    const rowId = String(match.matchedSheetTransfer?.transferRowId ?? "").trim();
+    const status = rowId ? transferClaimStatusByRowId[rowId] : undefined;
+    const expectedLegs = status?.expectedLegs === 1 ? 1 : 2;
+    setTransferClaimModal({
+      open: true,
+      rowId: idForTx(tx),
+      expectedLegs,
+      submitting: false,
+      error: "",
+    });
+  }, [transferClaimStatusByRowId]);
+
+  const closeTransferClaimModal = useCallback(() => {
+    setTransferClaimModal({
+      open: false,
+      rowId: null,
+      expectedLegs: 2,
+      submitting: false,
+      error: "",
+    });
   }, []);
 
   const openAnchorModal = useCallback(async () => {
@@ -319,6 +450,16 @@ export default function ReconcilePage() {
     async (match: MatchResult) => {
       const tx = match.bankTransaction;
       const id = idForTx(tx);
+      const transferRowId = String(match.matchedSheetTransfer?.transferRowId ?? "").trim();
+      if (
+        match.matchedSheetTransfer &&
+        transferRowId &&
+        (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy")
+      ) {
+        openTransferClaimModal(match);
+        return;
+      }
+
       setActionError("");
       setProcessingId(id);
       try {
@@ -330,7 +471,7 @@ export default function ReconcilePage() {
         setProcessingId(null);
       }
     },
-    [persistProcessedHash],
+    [openTransferClaimModal, persistProcessedHash],
   );
 
   const handleDismiss = useCallback((match: MatchResult) => {
@@ -375,6 +516,164 @@ export default function ReconcilePage() {
     }
   }, [allMatches, closeQuickAdd, persistProcessedHash, quickAdd]);
 
+  const splitTargetAmount = useMemo(() => {
+    if (!splitModal.rowId) return 0;
+    const selected = allMatches.find((m) => idForTx(m.bankTransaction) === splitModal.rowId);
+    if (!selected) return 0;
+    return Math.abs(selected.bankTransaction.amount);
+  }, [allMatches, splitModal.rowId]);
+
+  const selectedClaimRows = useMemo(
+    () => splitModal.candidates.filter((row) => splitModal.selectedKeys.includes(row.key)),
+    [splitModal.candidates, splitModal.selectedKeys],
+  );
+
+  const splitEnteredAmount = useMemo(
+    () => selectedClaimRows.reduce((sum, row) => sum + row.amount, 0),
+    [selectedClaimRows],
+  );
+
+  const splitRemainingAmount = useMemo(
+    () => splitTargetAmount - splitEnteredAmount,
+    [splitEnteredAmount, splitTargetAmount],
+  );
+
+  const handleToggleSplitClaim = useCallback((key: string) => {
+    setSplitModal((prev) => {
+      const selected = new Set(prev.selectedKeys);
+      if (selected.has(key)) selected.delete(key);
+      else selected.add(key);
+      return {
+        ...prev,
+        error: "",
+        selectedKeys: Array.from(selected),
+      };
+    });
+  }, []);
+
+  const handleSplitSubmit = useCallback(async () => {
+    if (!splitModal.rowId) return;
+    const selected = allMatches.find((m) => idForTx(m.bankTransaction) === splitModal.rowId);
+    if (!selected) {
+      setSplitModal((prev) => ({ ...prev, error: "Transaction no longer available." }));
+      return;
+    }
+
+    const selectedRows = splitModal.candidates.filter((row) => splitModal.selectedKeys.includes(row.key));
+    if (selectedRows.length === 0) {
+      setSplitModal((prev) => ({ ...prev, error: "Select at least one existing sheet row." }));
+      return;
+    }
+
+    const targetCents = toCents(Math.abs(selected.bankTransaction.amount));
+    const enteredCents = selectedRows.reduce((sum, row) => sum + toCents(row.amount), 0);
+    if (enteredCents !== targetCents) {
+      setSplitModal((prev) => ({
+        ...prev,
+        error: `Selected rows must total ${fmtMoney(Math.abs(selected.bankTransaction.amount))}.`,
+      }));
+      return;
+    }
+
+    setSplitModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/claims", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bankTransaction: {
+            hash: selected.bankTransaction.hash,
+            accountName: selected.bankTransaction.accountName,
+            amount: selected.bankTransaction.amount,
+            date: selected.bankTransaction.date,
+            description: selected.bankTransaction.description,
+          },
+          links: selectedRows.map((row) => ({
+            sheetName: row.sheetName,
+            sheetRowId: row.rowId,
+            amount: row.amount,
+          })),
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to claim existing rows (${res.status})`);
+      }
+      setClaimedRowKeys((prev) => {
+        const next = new Set(prev);
+        selectedRows.forEach((row) => next.add(row.key));
+        return next;
+      });
+      setApprovedIds((prev) => new Set(prev).add(splitModal.rowId as string));
+      closeSplitModal();
+    } catch (err) {
+      setSplitModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Failed to claim selected rows.",
+      }));
+    }
+  }, [allMatches, closeSplitModal, splitModal]);
+
+  const handleTransferClaimSubmit = useCallback(async () => {
+    if (!transferClaimModal.rowId) return;
+    const selected = allMatches.find((m) => idForTx(m.bankTransaction) === transferClaimModal.rowId);
+    if (!selected) {
+      setTransferClaimModal((prev) => ({ ...prev, error: "Transaction no longer available." }));
+      return;
+    }
+    const transferRowId = String(selected.matchedSheetTransfer?.transferRowId ?? "").trim();
+    if (!transferRowId) {
+      setTransferClaimModal((prev) => ({
+        ...prev,
+        error: "Matched transfer row is missing Transfer Row ID.",
+      }));
+      return;
+    }
+
+    setTransferClaimModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/transfer-claims", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transferRowId,
+          expectedLegs: transferClaimModal.expectedLegs,
+          bankTransaction: {
+            hash: selected.bankTransaction.hash,
+            accountName: selected.bankTransaction.accountName,
+            amount: selected.bankTransaction.amount,
+          },
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to claim transfer leg (${res.status})`);
+      }
+      const payload = (await res.json()) as {
+        expectedLegs?: number;
+        claimedCount?: number;
+        isComplete?: boolean;
+      };
+      setTransferClaimStatusByRowId((prev) => ({
+        ...prev,
+        [transferRowId]: {
+          expectedLegs: payload.expectedLegs === 1 ? 1 : 2,
+          claimedCount: Number(payload.claimedCount ?? 1),
+          isComplete: Boolean(payload.isComplete),
+        },
+      }));
+      setApprovedIds((prev) => new Set(prev).add(transferClaimModal.rowId as string));
+      closeTransferClaimModal();
+    } catch (err) {
+      setTransferClaimModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Failed to claim transfer.",
+      }));
+    }
+  }, [allMatches, closeTransferClaimModal, transferClaimModal]);
+
   const onDrop = useCallback(
     async (files: File[]) => {
       const file = files[0];
@@ -389,17 +688,35 @@ export default function ReconcilePage() {
           throw new Error("CSV file has no data rows.");
         }
 
-        const [sheetRows, sheetTransfers, processedHashesRes] = await Promise.all([
+        const [sheetRows, sheetTransfers, processedHashesRes, claimsRes, transferClaimsRes] = await Promise.all([
           getExpenses(),
           getTransfers(),
           fetch("/api/reconciliation/processed", { cache: "no-store" }),
+          fetch("/api/reconciliation/claims", { cache: "no-store" }),
+          fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
         ]);
         if (!processedHashesRes.ok) {
           const err = await processedHashesRes.json().catch(() => ({ error: processedHashesRes.statusText }));
           throw new Error(err.error || "Failed to load processed hashes.");
         }
+        if (!claimsRes.ok) {
+          const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
+          throw new Error(err.error || "Failed to load claimed sheet rows.");
+        }
+        if (!transferClaimsRes.ok) {
+          const err = await transferClaimsRes.json().catch(() => ({ error: transferClaimsRes.statusText }));
+          throw new Error(err.error || "Failed to load transfer claims.");
+        }
         const processedHashesData = (await processedHashesRes.json()) as { hashes?: string[] };
         const processedHashes = processedHashesData.hashes ?? [];
+        const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+        const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
+        const transferClaimsData = (await transferClaimsRes.json()) as {
+          statusByRowId?: TransferClaimStatusByRowId;
+        };
+        setSheetExpenses(sheetRows);
+        setClaimedRowKeys(claimedRows);
+        setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
 
         const res = await fetch("/api/reconciliation/match", {
           method: "POST",
@@ -417,11 +734,7 @@ export default function ReconcilePage() {
           throw new Error(err.error || `Failed to match CSV (${res.status})`);
         }
         const data = (await res.json()) as MatchResponse;
-        const autoApprovable = data.matches.filter(
-          (match) =>
-            match.matchType !== "unmatched" &&
-            match.matchType !== "questionable_match_fuzzy",
-        );
+        const autoApprovable = data.matches.filter((match) => match.matchType === "exact_match");
         const autoApprovedIds: string[] = [];
         const autoApprovalErrors: string[] = [];
         await Promise.all(
@@ -531,16 +844,19 @@ export default function ReconcilePage() {
 
         <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
           <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-            <h2 className="text-white font-semibold">Unmatched or Questionable Transactions</h2>
+            <h2 className="text-white font-semibold">Unmatched, Questionable, or Transfer Transactions</h2>
           </div>
           <div className="p-3 text-sm">
             {inboxRows.length === 0 ? (
-              <p className="text-gray-400">No unmatched or questionable rows right now.</p>
+              <p className="text-gray-400">No rows requiring manual review right now.</p>
             ) : (
               <div className="space-y-2">
                 {inboxRows.map((match, index) => {
                   const tx = match.bankTransaction;
                   const id = idForTx(tx);
+                  const isTransferCandidate =
+                    (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy") &&
+                    Boolean(match.matchedSheetTransfer?.transferRowId);
                   return (
                     <div
                       key={`${id}-${index}`}
@@ -574,9 +890,14 @@ export default function ReconcilePage() {
                                   : ""}
                               </p>
                             </>
-                          ) : match.matchType === "questionable_match_fuzzy" && match.matchedSheetTransfer ? (
+                          ) : (match.matchType === "questionable_match_fuzzy" || match.matchType === "transfer") &&
+                            match.matchedSheetTransfer ? (
                             <>
-                              <p className="text-yellow-300 text-sm truncate">
+                              <p
+                                className={`text-sm truncate ${
+                                  match.matchType === "transfer" ? "text-green-300" : "text-yellow-300"
+                                }`}
+                              >
                                 {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
                                 {(match.matchedSheetTransfer.transferTo ?? "—")}
                               </p>
@@ -587,6 +908,9 @@ export default function ReconcilePage() {
                                     match.matchedSheetTransfer.date,
                                 )}{" "}
                                 • {fmtMoney(match.matchedSheetTransfer.amount)}
+                              </p>
+                              <p className="text-[11px] text-gray-500 mt-0.5">
+                                Transfer Row ID: {match.matchedSheetTransfer.transferRowId ?? "missing"}
                               </p>
                             </>
                           ) : (
@@ -599,8 +923,8 @@ export default function ReconcilePage() {
                             onClick={() => handleApprove(match)}
                             disabled={processingId === id}
                             className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
-                            aria-label="Approve match"
-                            title="Approve and mark processed"
+                            aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
+                            title={isTransferCandidate ? "Claim transfer leg" : "Approve and mark processed"}
                           >
                             {processingId === id ? (
                               <Loader2 className="w-4 h-4 animate-spin" />
@@ -620,11 +944,22 @@ export default function ReconcilePage() {
                           <button
                             type="button"
                             onClick={() => openQuickAdd(match)}
+                            disabled={Boolean(match.matchedSheetTransfer)}
                             className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 transition-colors"
                             aria-label="Quick add"
                             title="Quick add to sheet"
                           >
                             <PlusCircle className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openSplitModal(match)}
+                            disabled={Boolean(match.matchedSheetTransfer)}
+                            className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 transition-colors"
+                            aria-label="Claim existing rows"
+                            title="Claim existing unmatched sheet rows"
+                          >
+                            Claim
                           </button>
                         </div>
                       </div>
@@ -661,11 +996,12 @@ export default function ReconcilePage() {
                 {activeMatches.map((match, index) => {
                   const tx = match.bankTransaction;
                   const id = idForTx(tx);
-                  const isAutoMatched =
-                    match.matchType !== "unmatched" &&
-                    match.matchType !== "questionable_match_fuzzy";
+                  const isAutoMatched = match.matchType === "exact_match";
                   const isMatched = isAutoMatched || approvedIds.has(id);
-                  const isManualOnly = match.matchType === "unmatched" || dismissedIds.has(id);
+                  const isManualOnly =
+                    match.matchType === "unmatched" ||
+                    match.matchType === "transfer" ||
+                    dismissedIds.has(id);
                   const link = buildSheetLink(match.matchedSheetIndex);
                   return (
                     <div
@@ -803,6 +1139,195 @@ export default function ReconcilePage() {
               >
                 {quickAdd.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {splitModal.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeSplitModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="claim-existing-title"
+        >
+          <div
+            className="w-full max-w-3xl rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <h2 id="claim-existing-title" className="text-white font-semibold">
+                Claim Existing Sheet Rows
+              </h2>
+              <button
+                type="button"
+                onClick={closeSplitModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
+                Target: <span className="text-white">{fmtMoney(splitTargetAmount)}</span>
+                <span className="text-gray-500"> • </span>
+                Entered: <span className="text-white">{fmtMoney(splitEnteredAmount)}</span>
+                <span className="text-gray-500"> • </span>
+                Remaining:{" "}
+                <span
+                  className={
+                    toCents(splitRemainingAmount) === 0
+                      ? "text-green-300"
+                      : splitRemainingAmount > 0
+                        ? "text-yellow-300"
+                        : "text-red-300"
+                  }
+                >
+                  {fmtMoney(splitRemainingAmount)}
+                </span>
+              </div>
+
+              <div className="max-h-[50vh] overflow-auto rounded-md border border-charcoal-dark bg-charcoal">
+                {splitModal.candidates.length === 0 ? (
+                  <p className="px-3 py-2 text-sm text-gray-400">
+                    No unclaimed expense rows with a Row ID are available.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-charcoal-dark">
+                    {splitModal.candidates.map((row) => {
+                      const selected = splitModal.selectedKeys.includes(row.key);
+                      return (
+                        <label
+                          key={row.key}
+                          className="flex items-start gap-3 px-3 py-2 cursor-pointer hover:bg-[#2d2d2d]"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => handleToggleSplitClaim(row.key)}
+                            disabled={splitModal.submitting}
+                            className="mt-1"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm text-gray-200 truncate">
+                              {row.expenseType || "—"} • {row.description || "—"}
+                            </p>
+                            <p className="text-xs text-gray-400 mt-0.5">
+                              {fmtMoney(row.amount)}
+                              {row.timestamp ? ` • ${fmtDate(row.timestamp)}` : ""}
+                              {row.account ? ` • ${row.account}` : ""}
+                            </p>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              Row ID: {row.rowId}
+                            </p>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {splitModal.error && <p className="text-xs text-red-400">{splitModal.error}</p>}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeSplitModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSplitSubmit}
+                disabled={splitModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent-dark transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {splitModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Claim Rows
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {transferClaimModal.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeTransferClaimModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="transfer-claim-title"
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <h2 id="transfer-claim-title" className="text-white font-semibold">
+                Claim Transfer Leg
+              </h2>
+              <button
+                type="button"
+                onClick={closeTransferClaimModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-300">
+                Choose how many bank legs this transfer should require.
+              </p>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-sm text-gray-200">
+                  <input
+                    type="radio"
+                    name="transfer-expected-legs"
+                    checked={transferClaimModal.expectedLegs === 2}
+                    onChange={() =>
+                      setTransferClaimModal((prev) => ({ ...prev, expectedLegs: 2, error: "" }))
+                    }
+                    disabled={transferClaimModal.submitting}
+                  />
+                  2-leg transfer (between two bank accounts)
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-200">
+                  <input
+                    type="radio"
+                    name="transfer-expected-legs"
+                    checked={transferClaimModal.expectedLegs === 1}
+                    onChange={() =>
+                      setTransferClaimModal((prev) => ({ ...prev, expectedLegs: 1, error: "" }))
+                    }
+                    disabled={transferClaimModal.submitting}
+                  />
+                  1-leg transfer (cash or external movement)
+                </label>
+              </div>
+              {transferClaimModal.error && (
+                <p className="text-xs text-red-400">{transferClaimModal.error}</p>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeTransferClaimModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleTransferClaimSubmit}
+                disabled={transferClaimModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent-dark transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {transferClaimModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Claim Transfer
               </button>
             </div>
           </div>

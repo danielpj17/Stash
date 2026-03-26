@@ -103,7 +103,21 @@ export async function POST(request: NextRequest) {
       );
     }
     try {
-      return NextResponse.json(text ? JSON.parse(text) : { success: true });
+      const parsed = text ? JSON.parse(text) : { success: true };
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        String((parsed as { status?: unknown }).status ?? "").toLowerCase() === "error"
+      ) {
+        const message = String(
+          (parsed as { message?: unknown; error?: unknown }).message ??
+            (parsed as { message?: unknown; error?: unknown }).error ??
+            "Google Apps Script reported an error"
+        );
+        return NextResponse.json({ error: message }, { status: 400 });
+      }
+      return NextResponse.json(parsed);
     } catch {
       return NextResponse.json(
         { error: cleanErrorResponse(text, res.status) },

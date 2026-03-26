@@ -2,7 +2,8 @@
  * Service to fetch and submit data via the app's API route (which proxies to Google Apps Script).
  * This avoids CORS / "Failed to fetch" when calling the Web App from the browser.
  *
- * Sheet columns: Timestamp, Expense Type, Amount, Description, Month, Account
+ * Expenses columns: Timestamp, Expense Type, Amount, Description, Month, Row ID
+ * Transfers columns: Timestamp, Transfer from, Transfer To, Transfer Amount, Month, Transfer Row ID
  * Timestamp is set by the script on submit.
  */
 
@@ -15,11 +16,14 @@ export type SheetRow = {
   description: string;
   month: string;
   account?: string;
+  rowId?: string;
 };
 
 /** Normalize row keys from sheet (may be "Expense Type") to camelCase */
 function normalizeRow(raw: Record<string, unknown>): SheetRow {
   const account = (raw.Account ?? raw.account ?? "") as string;
+  const rowIdRaw = raw["Row ID"] ?? raw.rowId ?? raw.row_id;
+  const rowId = typeof rowIdRaw === "string" ? rowIdRaw.trim() : "";
   return {
     timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
     expenseType: (raw["Expense Type"] ?? raw.expenseType) as string,
@@ -27,6 +31,7 @@ function normalizeRow(raw: Record<string, unknown>): SheetRow {
     description: (raw.Description ?? raw.description) as string,
     month: (raw.Month ?? raw.month) as string,
     account: account.trim() || undefined,
+    rowId: rowId || undefined,
   };
 }
 
@@ -128,6 +133,7 @@ export type TransferRow = {
   transferFrom: string;
   transferTo: string;
   amount: number;
+  transferRowId?: string;
   /** Legacy rows only (old sheet had a description column instead of Transfer To). */
   description?: string;
   month: string;
@@ -136,11 +142,14 @@ export type TransferRow = {
 function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
   const transferTo =
     (raw["Transfer To"] ?? raw.transferTo ?? "") as string;
+  const transferRowIdRaw = raw["Transfer Row ID"] ?? raw.transferRowId ?? raw.transfer_row_id;
+  const transferRowId = typeof transferRowIdRaw === "string" ? transferRowIdRaw.trim() : "";
   return {
     timestamp: (raw.Timestamp ?? raw.timestamp) as string | undefined,
     transferFrom: (raw["Transfer from"] ?? raw["Transfer From"] ?? raw.transferFrom ?? "") as string,
     transferTo,
     amount: Number(raw["Transfer Amount"] ?? raw.amount ?? 0),
+    transferRowId: transferRowId || undefined,
     description: (() => {
       const d = raw["Transfer Description"] ?? raw["Transfer Descriptior"] ?? raw.description;
       const s = typeof d === "string" ? d.trim() : "";
