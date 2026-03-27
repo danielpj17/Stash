@@ -1039,6 +1039,12 @@ export default function ReconcilePage() {
     return Math.abs(selected.bankTransaction.amount);
   }, [allMatches, splitModal.rowId]);
 
+  const splitTargetTransaction = useMemo(() => {
+    if (!splitModal.rowId) return null;
+    const selected = allMatches.find((m) => idForTx(m.bankTransaction) === splitModal.rowId);
+    return selected?.bankTransaction ?? null;
+  }, [allMatches, splitModal.rowId]);
+
   const selectedClaimRows = useMemo(
     () => splitModal.candidates.filter((row) => splitModal.selectedKeys.includes(row.key)),
     [splitModal.candidates, splitModal.selectedKeys],
@@ -1121,6 +1127,52 @@ export default function ReconcilePage() {
         return next;
       });
       setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
+      const totalClaimedAmount = selectedRows.reduce((sum, row) => sum + row.amount, 0);
+      const claimedDescription =
+        selectedRows.length === 1
+          ? selectedRows[0].description || selected.bankTransaction.description
+          : `Split claim (${selectedRows.length} rows): ${selectedRows
+              .map((row) => row.description)
+              .filter((value) => Boolean(value && value.trim()))
+              .slice(0, 2)
+              .join(" + ") || selected.bankTransaction.description}`;
+      const linkedExpense = {
+        amount: totalClaimedAmount,
+        timestamp:
+          selectedRows.length === 1
+            ? selectedRows[0].timestamp ?? selected.bankTransaction.date
+            : selected.bankTransaction.date,
+        description: claimedDescription,
+        expenseType: selectedRows.length === 1 ? selectedRows[0].expenseType : "Split Claim",
+        account:
+          selectedRows.length === 1
+            ? selectedRows[0].account ?? selected.bankTransaction.accountName
+            : selected.bankTransaction.accountName,
+        rowId:
+          selectedRows.length === 1
+            ? selectedRows[0].rowId
+            : selectedRows.map((row) => row.rowId).join(", "),
+      };
+      setMatchesByAccount((prev) => {
+        const next: Record<string, MatchResult[]> = {};
+        for (const [account, rows] of Object.entries(prev)) {
+          next[account] = rows.map((row) => {
+            if (idForTx(row.bankTransaction) !== splitModal.rowId) return row;
+            return {
+              ...row,
+              reason:
+                selectedRows.length === 1
+                  ? "Claimed existing sheet row and marked processed."
+                  : `Claimed ${selectedRows.length} existing sheet rows and marked processed.`,
+              matchedSheetExpense: linkedExpense,
+              matchedSheetIndex: undefined,
+              matchedSheetTransfer: undefined,
+              matchedSheetTransferIndex: undefined,
+            };
+          });
+        }
+        return next;
+      });
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(splitModal.rowId as string);
@@ -2113,6 +2165,16 @@ export default function ReconcilePage() {
               </button>
             </div>
             <div className="p-4 space-y-3">
+              {splitTargetTransaction && (
+                <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
+                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Selected Transaction</p>
+                  <p className="text-gray-100 truncate">{splitTargetTransaction.description || "—"}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {splitTargetTransaction.accountName} • {fmtDate(splitTargetTransaction.date)} •{" "}
+                    {fmtMoney(splitTargetTransaction.amount)}
+                  </p>
+                </div>
+              )}
               <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
                 Target: <span className="text-white">{fmtMoney(splitTargetAmount)}</span>
                 <span className="text-gray-500"> • </span>
