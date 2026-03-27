@@ -34,6 +34,11 @@ export const BANK_PROFILES: Record<string, BankProfile> = {
   },
 };
 
+type ResolvedBankProfile = {
+  profile: BankProfile;
+  startRowIndex: number;
+};
+
 export type BankTransaction = {
   accountName: string;
   date: string;
@@ -161,6 +166,64 @@ function isProfileConfigured(profile: BankProfile): boolean {
     profile.amountIndex !== null &&
     profile.descriptionIndex !== null
   );
+}
+
+function parseBankAmount(rawValue: string): number | null {
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return null;
+
+  const isParenthesizedNegative = /^\(.*\)$/.test(trimmed);
+  const normalized = trimmed.replace(/[,$\s()]/g, "");
+  if (!normalized) return null;
+
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) return null;
+  return isParenthesizedNegative ? -Math.abs(numeric) : numeric;
+}
+
+function normalizeHeaderCell(value: string): string {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/\uFEFF/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function isVenmoProfile(accountName: string): boolean {
+  return accountName.trim().toLowerCase() === "venmo";
+}
+
+function resolveVenmoProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
+  if (!Array.isArray(rows) || !isProfileConfigured(fallback)) {
+    return { profile: fallback, startRowIndex: 0 };
+  }
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i] ?? [];
+    const normalized = row.map((cell) => normalizeHeaderCell(cell));
+    const dateIndex = normalized.findIndex(
+      (cell) => cell === "datetime" || cell === "date time" || cell === "date",
+    );
+    const amountIndex = normalized.findIndex(
+      (cell) => cell === "amount total" || cell === "total amount" || cell === "amount",
+    );
+    const descriptionIndex = normalized.findIndex(
+      (cell) => cell === "note" || cell === "description" || cell === "details",
+    );
+    if (dateIndex >= 0 && amountIndex >= 0 && descriptionIndex >= 0) {
+      return {
+        profile: {
+          dateIndex,
+          amountIndex,
+          descriptionIndex,
+        },
+        startRowIndex: i + 1,
+      };
+    }
+  }
+
+  return { profile: fallback, startRowIndex: 0 };
 }
 
 function formatDateKeyFromDate(date: Date): string {
@@ -291,20 +354,22 @@ function isLikelyTransferDescription(value: string): boolean {
 export function mapBankRowToTransaction(
   accountName: keyof typeof BANK_PROFILES | string,
   row: string[],
+  profileOverride?: BankProfile,
 ): BankTransaction | null {
-  const profile = BANK_PROFILES[accountName];
+  const profile = profileOverride ?? BANK_PROFILES[accountName];
   if (!profile || !isProfileConfigured(profile)) return null;
 
   const dateIndex = profile.dateIndex as number;
   const amountIndex = profile.amountIndex as number;
   const descriptionIndex = profile.descriptionIndex as number;
   const postedDate = String(row[dateIndex] ?? "").trim();
-  const rawAmount = String(row[amountIndex] ?? "").replace(/[$,]/g, "").trim();
+  const rawAmount = String(row[amountIndex] ?? "");
   const rawDescription = String(row[descriptionIndex] ?? "").trim();
   const description = cleanBankDescription(rawDescription);
-  const date = deriveBankTransactionDate(String(accountName), postedDate, rawDescription);
-  const amount = Number(rawAmount);
-  if (!date || !description || !Number.isFinite(amount)) return null;
+  const derivedDate = deriveBankTransactionDate(String(accountName), postedDate, rawDescription);
+  const date = normalizeDateOnly(derivedDate);
+  const amount = parseBankAmount(rawAmount);
+  if (!date || !description || amount === null) return null;
 
   return {
     accountName: String(accountName),
@@ -320,8 +385,16 @@ export function mapBankRowsToTransactions(
   accountName: keyof typeof BANK_PROFILES | string,
   rows: string[][],
 ): BankTransaction[] {
+  const fallbackProfile = BANK_PROFILES[accountName];
+  if (!fallbackProfile || !isProfileConfigured(fallbackProfile)) return [];
+
+  const resolved = isVenmoProfile(String(accountName))
+    ? resolveVenmoProfile(rows, fallbackProfile)
+    : { profile: fallbackProfile, startRowIndex: 0 };
+
   return rows
-    .map((row) => mapBankRowToTransaction(accountName, row))
+    .slice(resolved.startRowIndex)
+    .map((row) => mapBankRowToTransaction(accountName, row, resolved.profile))
     .filter((tx): tx is BankTransaction => tx !== null);
 }
 
