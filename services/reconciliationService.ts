@@ -78,6 +78,7 @@ type TransferClaimStatus = {
 
 export type MatchType =
   | "exact_match"
+  | "processed"
   | "questionable_match_fuzzy"
   | "transfer"
   | "unmatched";
@@ -421,10 +422,11 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
  * Match bank transactions against processed hashes, existing sheet rows, and transfer pairs.
  *
  * Priority:
- * 1) Exact Match: hash exists in Neon OR amount+date equals a sheet row.
- * 2) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 31 days.
- * 3) Transfer: amount/date aligns with transfer rows or opposing bank transaction.
- * 4) Unmatched.
+ * 1) Exact Match: amount+date equals a sheet row.
+ * 2) Processed: hash exists in Neon but no current sheet row is linked.
+ * 3) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 31 days.
+ * 4) Transfer: amount/date aligns with transfer rows or opposing bank transaction.
+ * 5) Unmatched.
  */
 export async function findMatches(
   bankTransactions: BankTransaction[],
@@ -449,16 +451,23 @@ export async function findMatches(
       : -1;
     const exactByHash = processedHashes.has(tx.hash);
 
-    if (exactByHash || exactSheet) {
+    if (exactSheet) {
       return {
         bankTransaction: tx,
         matchType: "exact_match",
-        reason: exactByHash
-          ? "Exact Match: transaction hash already exists in Neon."
-          : "Exact Match: identical amount and date already exists in sheet.",
+        reason: "Exact Match: identical amount and date already exists in sheet.",
         matchedByNeonHash: exactByHash,
         matchedSheetExpense: exactSheet,
         matchedSheetIndex: exactSheetIndexValue >= 0 ? exactSheetIndexValue : undefined,
+      };
+    }
+    if (exactByHash) {
+      return {
+        bankTransaction: tx,
+        matchType: "processed",
+        reason:
+          "Already processed: transaction hash exists in Neon, but no linked sheet entry is currently found.",
+        matchedByNeonHash: true,
       };
     }
 

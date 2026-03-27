@@ -1895,6 +1895,9 @@ export default function ReconcilePage() {
                     {activeCompletedRows.map((match, index) => {
                       const tx = match.bankTransaction;
                       const link = buildSheetLink(match.matchedSheetIndex);
+                      const hasLinkedEntry = Boolean(
+                        match.matchedSheetExpense || match.matchedSheetTransfer,
+                      );
                       return (
                         <div
                           key={`${idForTx(tx)}-${index}`}
@@ -1950,16 +1953,19 @@ export default function ReconcilePage() {
                             </div>
                             <div className="text-right shrink-0">
                               <div className="text-green-300 text-xs font-medium">
-                                Matched
-                                {link ? (
+                                {hasLinkedEntry ? "Matched" : "Processed"}
+                                {hasLinkedEntry && link ? (
                                   <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
                                     Sheet entry
                                   </Link>
-                                ) : (
+                                ) : hasLinkedEntry ? (
                                   <Link href="/budget" className="ml-2 underline text-blue-300">
                                     Budget entry
                                   </Link>
-                                )}
+                                ) : null}
+                                {!hasLinkedEntry ? (
+                                  <span className="ml-2 text-gray-400">No linked entry</span>
+                                ) : null}
                               </div>
                               <div className="mt-2 flex justify-end">
                                 <button
