@@ -1546,9 +1546,55 @@ export default function ReconcilePage() {
                             Suggested
                           </p>
                           {suggestedRows.slice(0, 3).map((match, idx) => (
-                            <div key={`${idForTx(match.bankTransaction)}-${idx}`} className="text-xs text-gray-300">
-                              {fmtDate(match.bankTransaction.date)} • {match.bankTransaction.description || "—"} •{" "}
-                              {fmtMoney(match.bankTransaction.amount)}
+                            <div
+                              key={`${idForTx(match.bankTransaction)}-${idx}`}
+                              className="grid gap-1.5 md:gap-2 md:grid-cols-2 rounded-md border border-charcoal-dark bg-charcoal/40 px-2 py-1.5 md:py-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-[10px] uppercase tracking-wide text-gray-500">Bank</p>
+                                <p className="text-[11px] md:text-xs text-gray-300 truncate">
+                                  {match.bankTransaction.description || "—"}
+                                </p>
+                                <p className="text-[10px] md:text-[11px] text-gray-500">
+                                  {fmtDate(match.bankTransaction.date)} •{" "}
+                                  {fmtMoney(match.bankTransaction.amount)}
+                                </p>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[10px] uppercase tracking-wide text-gray-500">User-inputted</p>
+                                {match.matchedSheetExpense ? (
+                                  <>
+                                    <p className="text-[11px] md:text-xs text-yellow-300 truncate">
+                                      {match.matchedSheetExpense.description || "—"}
+                                    </p>
+                                    <p className="text-[10px] md:text-[11px] text-gray-500">
+                                      {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                      {fmtDate(
+                                        match.matchedSheetExpense.timestamp ??
+                                          match.matchedSheetExpense.date,
+                                      )}{" "}
+                                      • {fmtMoney(match.matchedSheetExpense.amount)}
+                                    </p>
+                                  </>
+                                ) : match.matchedSheetTransfer ? (
+                                  <>
+                                    <p className="text-[11px] md:text-xs text-yellow-300 truncate">
+                                      {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                      {(match.matchedSheetTransfer.transferTo ?? "—")}
+                                    </p>
+                                    <p className="text-[10px] md:text-[11px] text-gray-500">
+                                      Transfer •{" "}
+                                      {fmtDate(
+                                        match.matchedSheetTransfer.timestamp ??
+                                          match.matchedSheetTransfer.date,
+                                      )}{" "}
+                                      • {fmtMoney(match.matchedSheetTransfer.amount)}
+                                    </p>
+                                  </>
+                                ) : (
+                                  <p className="text-[11px] text-gray-500">No candidate match</p>
+                                )}
+                              </div>
                             </div>
                           ))}
                           {suggestedRemaining > 0 && (
@@ -1562,9 +1608,40 @@ export default function ReconcilePage() {
                             Auto-matched
                           </p>
                           {autoRows.slice(0, 3).map((match, idx) => (
-                            <div key={`${idForTx(match.bankTransaction)}-auto-${idx}`} className="text-xs text-gray-300">
-                              {fmtDate(match.bankTransaction.date)} • {match.bankTransaction.description || "—"} •{" "}
-                              {fmtMoney(match.bankTransaction.amount)}
+                            <div
+                              key={`${idForTx(match.bankTransaction)}-auto-${idx}`}
+                              className="grid gap-1.5 md:gap-2 md:grid-cols-2 rounded-md border border-charcoal-dark bg-charcoal/40 px-2 py-1.5 md:py-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-[10px] uppercase tracking-wide text-gray-500">Bank</p>
+                                <p className="text-[11px] md:text-xs text-gray-300 truncate">
+                                  {match.bankTransaction.description || "—"}
+                                </p>
+                                <p className="text-[10px] md:text-[11px] text-gray-500">
+                                  {fmtDate(match.bankTransaction.date)} •{" "}
+                                  {fmtMoney(match.bankTransaction.amount)}
+                                </p>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[10px] uppercase tracking-wide text-gray-500">User-inputted</p>
+                                {match.matchedSheetExpense ? (
+                                  <>
+                                    <p className="text-[11px] md:text-xs text-green-300 truncate">
+                                      {match.matchedSheetExpense.description || "—"}
+                                    </p>
+                                    <p className="text-[10px] md:text-[11px] text-gray-500">
+                                      {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                      {fmtDate(
+                                        match.matchedSheetExpense.timestamp ??
+                                          match.matchedSheetExpense.date,
+                                      )}{" "}
+                                      • {fmtMoney(match.matchedSheetExpense.amount)}
+                                    </p>
+                                  </>
+                                ) : (
+                                  <p className="text-[11px] text-gray-500">No linked entry</p>
+                                )}
+                              </div>
                             </div>
                           ))}
                           {autoRemaining > 0 && (
@@ -1737,36 +1814,65 @@ export default function ReconcilePage() {
                           key={`${id}-auto-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="flex items-center justify-between gap-3">
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Bank Transaction
+                              </p>
                               <p className="text-gray-200 truncate">{tx.description || "—"}</p>
                               <p className="text-xs text-gray-400 mt-0.5">
-                                {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                               </p>
                             </div>
-                            <div className="text-right shrink-0 text-green-300 text-xs font-medium">
-                              Auto-matched
-                              {link ? (
-                                <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
-                                  Sheet entry
-                                </Link>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                User-inputted Entry
+                              </p>
+                              {match.matchedSheetExpense ? (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">
+                                    {match.matchedSheetExpense.description || "—"}
+                                  </p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetExpense.amount)}
+                                    {match.matchedSheetExpense.account
+                                      ? ` • ${match.matchedSheetExpense.account}`
+                                      : ""}
+                                  </p>
+                                </>
                               ) : (
-                                <Link href="/budget" className="ml-2 underline text-blue-300">
-                                  Budget entry
-                                </Link>
+                                <p className="text-xs text-gray-500">No linked user-inputted entry</p>
                               )}
                             </div>
-                          </div>
-                          <div className="mt-2 flex justify-end">
-                            <button
-                              type="button"
-                              onClick={() => handleDisconnect(match)}
-                              disabled={processingId === id}
-                              className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
-                              title="Disconnect match and allow rematch"
-                            >
-                              Disconnect
-                            </button>
+                            <div className="text-right shrink-0">
+                              <div className="text-green-300 text-xs font-medium">
+                                Auto-matched
+                                {link ? (
+                                  <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
+                                    Sheet entry
+                                  </Link>
+                                ) : (
+                                  <Link href="/budget" className="ml-2 underline text-blue-300">
+                                    Budget entry
+                                  </Link>
+                                )}
+                              </div>
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDisconnect(match)}
+                                  disabled={processingId === id}
+                                  className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
+                                  title="Disconnect match and allow rematch"
+                                >
+                                  Disconnect
+                                </button>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       );
@@ -1794,36 +1900,79 @@ export default function ReconcilePage() {
                           key={`${idForTx(tx)}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="flex items-center justify-between gap-3">
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Bank Transaction
+                              </p>
                               <p className="text-gray-200 truncate">{tx.description || "—"}</p>
                               <p className="text-xs text-gray-400 mt-0.5">
-                                {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                               </p>
                             </div>
-                            <div className="text-right shrink-0 text-green-300 text-xs font-medium">
-                              Matched
-                              {link ? (
-                                <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
-                                  Sheet entry
-                                </Link>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                User-inputted Entry
+                              </p>
+                              {match.matchedSheetExpense ? (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">
+                                    {match.matchedSheetExpense.description || "—"}
+                                  </p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetExpense.amount)}
+                                    {match.matchedSheetExpense.account
+                                      ? ` • ${match.matchedSheetExpense.account}`
+                                      : ""}
+                                  </p>
+                                </>
+                              ) : match.matchedSheetTransfer ? (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">
+                                    {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                    {(match.matchedSheetTransfer.transferTo ?? "—")}
+                                  </p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    Transfer •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetTransfer.amount)}
+                                  </p>
+                                </>
                               ) : (
-                                <Link href="/budget" className="ml-2 underline text-blue-300">
-                                  Budget entry
-                                </Link>
+                                <p className="text-xs text-gray-500">No linked user-inputted entry</p>
                               )}
                             </div>
-                          </div>
-                          <div className="mt-2 flex justify-end">
-                            <button
-                              type="button"
-                              onClick={() => handleDisconnect(match)}
-                              disabled={processingId === idForTx(tx)}
-                              className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
-                              title="Disconnect match and allow rematch"
-                            >
-                              Disconnect
-                            </button>
+                            <div className="text-right shrink-0">
+                              <div className="text-green-300 text-xs font-medium">
+                                Matched
+                                {link ? (
+                                  <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
+                                    Sheet entry
+                                  </Link>
+                                ) : (
+                                  <Link href="/budget" className="ml-2 underline text-blue-300">
+                                    Budget entry
+                                  </Link>
+                                )}
+                              </div>
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDisconnect(match)}
+                                  disabled={processingId === idForTx(tx)}
+                                  className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
+                                  title="Disconnect match and allow rematch"
+                                >
+                                  Disconnect
+                                </button>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       );
