@@ -172,6 +172,17 @@ function hasLinkedUserInputtedEntry(match: MatchResult): boolean {
   return Boolean(match.matchedSheetExpense || match.matchedSheetTransfer);
 }
 
+function isPartialTwoLegTransferMatch(
+  match: MatchResult,
+  transferStatusByRowId: TransferClaimStatusByRowId,
+): boolean {
+  const transferRowId = String(match.matchedSheetTransfer?.transferRowId ?? "").trim();
+  if (!transferRowId) return false;
+  const status = transferStatusByRowId[transferRowId];
+  if (!status) return false;
+  return status.expectedLegs === 2 && !status.isComplete;
+}
+
 function accountHasConfiguredParser(account: string): boolean {
   return CSV_PARSER_READY_ACCOUNTS.has(account as AccountOption);
 }
@@ -276,6 +287,7 @@ export default function ReconcilePage() {
     submitting: false,
     error: "",
   });
+  const [splitSearchQuery, setSplitSearchQuery] = useState("");
   const [transferClaimModal, setTransferClaimModal] = useState<TransferClaimModalState>({
     open: false,
     rowId: null,
@@ -499,36 +511,54 @@ export default function ReconcilePage() {
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        if (dismissedIds.has(id) || processedHashes.has(match.bankTransaction.hash)) return false;
+        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
+        if (dismissedIds.has(id)) return false;
+        if (processedHashes.has(match.bankTransaction.hash) && !partialTwoLegTransfer) return false;
         return isStatementManualReview(match) || disconnectedIds.has(id);
       });
     });
     return byAccount;
-  }, [dismissedIds, processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [
+    dismissedIds,
+    processedHashes,
+    disconnectedIds,
+    statementRowsByAccount,
+    tabAccounts,
+    transferClaimStatusByRowId,
+  ]);
 
   const statementCompletedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
+        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
         if (disconnectedIds.has(id)) return false;
         return (
+          !partialTwoLegTransfer &&
           processedHashes.has(match.bankTransaction.hash) &&
           (match.matchType !== "exact_match" || !hasLinkedUserInputtedEntry(match))
         );
       });
     });
     return byAccount;
-  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [
+    processedHashes,
+    disconnectedIds,
+    statementRowsByAccount,
+    tabAccounts,
+    transferClaimStatusByRowId,
+  ]);
 
   const statementSuggestedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
+        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
         if (
           dismissedIds.has(id) ||
-          processedHashes.has(match.bankTransaction.hash) ||
+          (processedHashes.has(match.bankTransaction.hash) && !partialTwoLegTransfer) ||
           disconnectedIds.has(id)
         ) {
           return false;
@@ -537,7 +567,14 @@ export default function ReconcilePage() {
       });
     });
     return byAccount;
-  }, [processedHashes, disconnectedIds, dismissedIds, statementRowsByAccount, tabAccounts]);
+  }, [
+    processedHashes,
+    disconnectedIds,
+    dismissedIds,
+    statementRowsByAccount,
+    tabAccounts,
+    transferClaimStatusByRowId,
+  ]);
 
   const statementAutoMatchedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
@@ -726,6 +763,7 @@ export default function ReconcilePage() {
         submitting: false,
         error: "",
       });
+      setSplitSearchQuery("");
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to open claim modal.");
     }
@@ -740,6 +778,7 @@ export default function ReconcilePage() {
       submitting: false,
       error: "",
     });
+    setSplitSearchQuery("");
   }, []);
 
   const openTransferClaimModal = useCallback((match: MatchResult) => {
@@ -1044,6 +1083,25 @@ export default function ReconcilePage() {
     const selected = allMatches.find((m) => idForTx(m.bankTransaction) === splitModal.rowId);
     return selected?.bankTransaction ?? null;
   }, [allMatches, splitModal.rowId]);
+
+  const sortedSplitCandidates = useMemo(
+    () => sortByNewestDate(splitModal.candidates, (row) => row.timestamp),
+    [splitModal.candidates],
+  );
+
+  const filteredSplitCandidates = useMemo(() => {
+    const q = normalizeText(splitSearchQuery);
+    if (!q) return sortedSplitCandidates;
+    return sortedSplitCandidates.filter((row) =>
+      [
+        row.expenseType,
+        row.description,
+        row.account,
+        row.rowId,
+        row.timestamp,
+      ].some((value) => normalizeText(value).includes(q)),
+    );
+  }, [sortedSplitCandidates, splitSearchQuery]);
 
   const selectedClaimRows = useMemo(
     () => splitModal.candidates.filter((row) => splitModal.selectedKeys.includes(row.key)),
@@ -1390,6 +1448,10 @@ export default function ReconcilePage() {
   );
   const activeCompletedRows = (statementCompletedRowsByAccount[activeTab] ?? []).filter(
     (row) => row.bankTransaction.accountName === activeTab,
+  );
+  const activeMatchedRows = sortByNewestDate(
+    [...activeAutoMatchedRows, ...activeCompletedRows],
+    (row) => row.bankTransaction.date,
   );
   const selectedAccountUploadedFiles = uploadedFilesByAccount[selectedAccount] ?? [];
 
@@ -1858,102 +1920,15 @@ export default function ReconcilePage() {
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">{activeTab}: Auto-matched</h2>
-                <span className="text-xs text-gray-300">{activeAutoMatchedRows.length}</span>
+                <h2 className="text-white font-semibold">{activeTab}: Matched</h2>
+                <span className="text-xs text-gray-300">{activeMatchedRows.length}</span>
               </div>
               <div className="p-3 text-sm">
-                {activeAutoMatchedRows.length === 0 ? (
-                  <p className="text-gray-400">No auto-matched rows for this account yet.</p>
+                {activeMatchedRows.length === 0 ? (
+                  <p className="text-gray-400">No matched rows for this account yet.</p>
                 ) : (
                   <div className="space-y-2">
-                    {activeAutoMatchedRows.map((match, index) => {
-                      const tx = match.bankTransaction;
-                      const id = idForTx(tx);
-                      const link = buildSheetLink(match.matchedSheetIndex);
-                      return (
-                        <div
-                          key={`${id}-auto-${index}`}
-                          className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
-                        >
-                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
-                            <div className="min-w-0">
-                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                Bank Transaction
-                              </p>
-                              <p className="text-gray-200 truncate">{tx.description || "—"}</p>
-                              <p className="text-xs text-gray-400 mt-0.5">
-                                {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
-                              </p>
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                User-inputted Entry
-                              </p>
-                              {match.matchedSheetExpense ? (
-                                <>
-                                  <p className="text-green-300 text-sm truncate">
-                                    {match.matchedSheetExpense.description || "—"}
-                                  </p>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
-                                    {fmtDate(
-                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
-                                    )}{" "}
-                                    • {fmtMoney(match.matchedSheetExpense.amount)}
-                                    {match.matchedSheetExpense.account
-                                      ? ` • ${match.matchedSheetExpense.account}`
-                                      : ""}
-                                  </p>
-                                </>
-                              ) : (
-                                <p className="text-xs text-gray-500">No linked user-inputted entry</p>
-                              )}
-                            </div>
-                            <div className="text-right shrink-0">
-                              <div className="text-green-300 text-xs font-medium">
-                                Auto-matched
-                                {link ? (
-                                  <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
-                                    Sheet entry
-                                  </Link>
-                                ) : (
-                                  <Link href="/budget" className="ml-2 underline text-blue-300">
-                                    Budget entry
-                                  </Link>
-                                )}
-                              </div>
-                              <div className="mt-2 flex justify-end">
-                                <button
-                                  type="button"
-                                  onClick={() => handleDisconnect(match)}
-                                  disabled={processingId === id}
-                                  className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
-                                  title="Disconnect match and allow rematch"
-                                >
-                                  Disconnect
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </section>
-
-            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">{activeTab}: Manually Completed / Matched</h2>
-                <span className="text-xs text-gray-300">{activeCompletedRows.length}</span>
-              </div>
-              <div className="p-3 text-sm">
-                {activeCompletedRows.length === 0 ? (
-                  <p className="text-gray-400">No completed matches yet for this account.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {activeCompletedRows.map((match, index) => {
+                    {activeMatchedRows.map((match, index) => {
                       const tx = match.bankTransaction;
                       const link = buildSheetLink(match.matchedSheetIndex);
                       const hasLinkedEntry = Boolean(
@@ -2051,8 +2026,8 @@ export default function ReconcilePage() {
 
             {accountDetailRows.length > 0 && (
               <p className="text-xs text-gray-500">
-                Showing {activeReviewRows.length} unmatched/suggested, {activeAutoMatchedRows.length} auto-matched,
-                and {activeCompletedRows.length} manually completed rows for {activeTab}.
+                Showing {activeReviewRows.length} unmatched/suggested and {activeMatchedRows.length} matched rows
+                for {activeTab}.
               </p>
             )}
           </>
@@ -2194,14 +2169,27 @@ export default function ReconcilePage() {
                 </span>
               </div>
 
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Search rows</label>
+                <input
+                  type="text"
+                  value={splitSearchQuery}
+                  onChange={(e) => setSplitSearchQuery(e.target.value)}
+                  placeholder="Search by type, description, account, row ID, or date"
+                  className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                />
+              </div>
+
               <div className="max-h-[50vh] overflow-auto rounded-md border border-charcoal-dark bg-charcoal">
-                {splitModal.candidates.length === 0 ? (
+                {filteredSplitCandidates.length === 0 ? (
                   <p className="px-3 py-2 text-sm text-gray-400">
-                    No unclaimed expense rows with a Row ID are available.
+                    {splitSearchQuery.trim()
+                      ? "No rows match your search."
+                      : "No unclaimed expense rows with a Row ID are available."}
                   </p>
                 ) : (
                   <div className="divide-y divide-charcoal-dark">
-                    {splitModal.candidates.map((row) => {
+                    {filteredSplitCandidates.map((row) => {
                       const selected = splitModal.selectedKeys.includes(row.key);
                       return (
                         <label
