@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS reconciliation_transfer_claim_links (
   PRIMARY KEY (transfer_sheet_row_id, bank_hash),
   UNIQUE (bank_hash)
 );
+
+CREATE TABLE IF NOT EXISTS reconciliation_statement_dismissals (
+  hash TEXT NOT NULL,
+  account_name TEXT NOT NULL,
+  note TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT now(),
+  PRIMARY KEY (hash, account_name)
+);
 ```
 
 4. Run the manual assets/liabilities setup script from `docs/neon-manual-assets-liabilities.sql` in the same SQL editor.

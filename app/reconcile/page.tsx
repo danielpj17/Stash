@@ -103,6 +103,14 @@ type AnchorModalState = {
   error: string;
 };
 
+type DismissModalState = {
+  open: boolean;
+  match: MatchResult | null;
+  note: string;
+  submitting: boolean;
+  error: string;
+};
+
 const ACCOUNT_OPTIONS: AccountOption[] = [
   "WF Checking",
   "WF Savings",
@@ -170,17 +178,6 @@ function isStatementManualReview(match: MatchResult): boolean {
 
 function hasLinkedUserInputtedEntry(match: MatchResult): boolean {
   return Boolean(match.matchedSheetExpense || match.matchedSheetTransfer);
-}
-
-function isPartialTwoLegTransferMatch(
-  match: MatchResult,
-  transferStatusByRowId: TransferClaimStatusByRowId,
-): boolean {
-  const transferRowId = String(match.matchedSheetTransfer?.transferRowId ?? "").trim();
-  if (!transferRowId) return false;
-  const status = transferStatusByRowId[transferRowId];
-  if (!status) return false;
-  return status.expectedLegs === 2 && !status.isComplete;
 }
 
 function accountHasConfiguredParser(account: string): boolean {
@@ -259,7 +256,7 @@ export default function ReconcilePage() {
   const [matchesByAccount, setMatchesByAccount] = useState<Record<string, MatchResult[]>>({});
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [dismissalNotesById, setDismissalNotesById] = useState<Record<string, string>>({});
   const [processedHashes, setProcessedHashes] = useState<Set<string>>(new Set());
   const [disconnectedIds, setDisconnectedIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState("");
@@ -303,6 +300,13 @@ export default function ReconcilePage() {
     saving: false,
     error: "",
   });
+  const [dismissModal, setDismissModal] = useState<DismissModalState>({
+    open: false,
+    match: null,
+    note: "",
+    submitting: false,
+    error: "",
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -313,7 +317,6 @@ export default function ReconcilePage() {
         selectedAccount?: string;
         activeTab?: string;
         matchesByAccount?: Record<string, MatchResult[]>;
-        dismissedIds?: string[];
       };
 
       if (
@@ -332,9 +335,6 @@ export default function ReconcilePage() {
       ) {
         setMatchesByAccount(parsed.matchesByAccount);
       }
-      if (Array.isArray(parsed.dismissedIds)) {
-        setDismissedIds(new Set(parsed.dismissedIds.map((id) => String(id))));
-      }
     } catch {
       // Ignore corrupted local storage and continue with empty in-memory state.
     }
@@ -346,36 +346,44 @@ export default function ReconcilePage() {
       selectedAccount,
       activeTab,
       matchesByAccount,
-      dismissedIds: Array.from(dismissedIds),
     };
     try {
       window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage quota/security errors; page still works in-memory.
     }
-  }, [
-    activeTab,
-    dismissedIds,
-    matchesByAccount,
-    selectedAccount,
-  ]);
+  }, [activeTab, matchesByAccount, selectedAccount]);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadProcessedHashes() {
+    async function loadProcessedAndDismissals() {
       try {
-        const res = await fetch("/api/reconciliation/processed", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as { hashes?: string[] };
+        const [processedRes, dismissalsRes] = await Promise.all([
+          fetch("/api/reconciliation/processed", { cache: "no-store" }),
+          fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+        ]);
         if (cancelled) return;
-        setProcessedHashes(new Set((data.hashes ?? []).map((hash) => String(hash))));
+        if (processedRes.ok) {
+          const data = (await processedRes.json()) as { hashes?: string[] };
+          setProcessedHashes(new Set((data.hashes ?? []).map((hash) => String(hash))));
+        }
+        if (dismissalsRes.ok) {
+          const data = (await dismissalsRes.json()) as {
+            dismissals?: Array<{ hash: string; accountName: string; note: string }>;
+          };
+          const map: Record<string, string> = {};
+          for (const d of data.dismissals ?? []) {
+            map[`${d.accountName}|${d.hash}`] = d.note;
+          }
+          setDismissalNotesById(map);
+        }
       } catch {
         // Keep in-memory defaults if fetch fails.
       }
     }
 
-    void loadProcessedHashes();
+    void loadProcessedAndDismissals();
     return () => {
       cancelled = true;
     };
@@ -511,82 +519,55 @@ export default function ReconcilePage() {
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
-        if (dismissedIds.has(id)) return false;
-        if (processedHashes.has(match.bankTransaction.hash) && !partialTwoLegTransfer) return false;
+        if (processedHashes.has(match.bankTransaction.hash)) return false;
         return isStatementManualReview(match) || disconnectedIds.has(id);
       });
     });
     return byAccount;
-  }, [
-    dismissedIds,
-    processedHashes,
-    disconnectedIds,
-    statementRowsByAccount,
-    tabAccounts,
-    transferClaimStatusByRowId,
-  ]);
+  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementCompletedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
         if (disconnectedIds.has(id)) return false;
-        return (
-          !partialTwoLegTransfer &&
-          processedHashes.has(match.bankTransaction.hash) &&
-          (match.matchType !== "exact_match" || !hasLinkedUserInputtedEntry(match))
-        );
+        if (!processedHashes.has(match.bankTransaction.hash)) return false;
+        const dismissed = Boolean(dismissalNotesById[id]);
+        const completedWithoutExactSheet =
+          match.matchType !== "exact_match" || !hasLinkedUserInputtedEntry(match);
+        return completedWithoutExactSheet || dismissed;
       });
     });
     return byAccount;
-  }, [
-    processedHashes,
-    disconnectedIds,
-    statementRowsByAccount,
-    tabAccounts,
-    transferClaimStatusByRowId,
-  ]);
+  }, [dismissalNotesById, processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementSuggestedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        const partialTwoLegTransfer = isPartialTwoLegTransferMatch(match, transferClaimStatusByRowId);
-        if (
-          dismissedIds.has(id) ||
-          (processedHashes.has(match.bankTransaction.hash) && !partialTwoLegTransfer) ||
-          disconnectedIds.has(id)
-        ) {
+        if (processedHashes.has(match.bankTransaction.hash) || disconnectedIds.has(id)) {
           return false;
         }
         return match.matchType === "questionable_match_fuzzy" || match.matchType === "transfer";
       });
     });
     return byAccount;
-  }, [
-    processedHashes,
-    disconnectedIds,
-    dismissedIds,
-    statementRowsByAccount,
-    tabAccounts,
-    transferClaimStatusByRowId,
-  ]);
+  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementAutoMatchedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        if (dismissedIds.has(id) || disconnectedIds.has(id)) return false;
+        if (disconnectedIds.has(id)) return false;
+        if (dismissalNotesById[id]) return false;
         return match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match);
       });
     });
     return byAccount;
-  }, [dismissedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [dismissalNotesById, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const accountDetailRows = useMemo(
     () => [
@@ -932,10 +913,57 @@ export default function ReconcilePage() {
     [openTransferClaimModal, persistProcessedHash],
   );
 
-  const handleDismiss = useCallback((match: MatchResult) => {
-    const id = idForTx(match.bankTransaction);
-    setDismissedIds((prev) => new Set(prev).add(id));
+  const openDismissModal = useCallback((match: MatchResult) => {
+    setDismissModal({
+      open: true,
+      match,
+      note: "",
+      submitting: false,
+      error: "",
+    });
   }, []);
+
+  const closeDismissModal = useCallback(() => {
+    setDismissModal({ open: false, match: null, note: "", submitting: false, error: "" });
+  }, []);
+
+  const handleDismissSubmit = useCallback(async () => {
+    const match = dismissModal.match;
+    if (!match) return;
+    const tx = match.bankTransaction;
+    const id = idForTx(tx);
+    const note = dismissModal.note.trim();
+    if (!note) {
+      setDismissModal((prev) => ({ ...prev, error: "Enter a note." }));
+      return;
+    }
+    setDismissModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/dismissals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName, note }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to save dismissal (${res.status})`);
+      }
+      setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+      setDismissalNotesById((prev) => ({ ...prev, [id]: note }));
+      setDisconnectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setDismissModal({ open: false, match: null, note: "", submitting: false, error: "" });
+    } catch (err) {
+      setDismissModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Failed to dismiss.",
+      }));
+    }
+  }, [dismissModal.match, dismissModal.note]);
 
   const handleDisconnect = useCallback(
     async (match: MatchResult) => {
@@ -950,33 +978,50 @@ export default function ReconcilePage() {
             accountName: tx.accountName,
           },
         };
-        const [processedRes, claimsRes, transferClaimsRes, refreshedClaimsRes, refreshedTransferRes] =
-          await Promise.all([
-            fetch("/api/reconciliation/processed", {
-              method: "DELETE",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
-            }),
-            fetch("/api/reconciliation/claims", {
-              method: "DELETE",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            }),
-            fetch("/api/reconciliation/transfer-claims", {
-              method: "DELETE",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            }),
-            fetch("/api/reconciliation/claims", { cache: "no-store" }),
-            fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
-          ]);
+        const [
+          processedRes,
+          dismissalsRes,
+          claimsRes,
+          transferClaimsRes,
+          refreshedClaimsRes,
+          refreshedTransferRes,
+        ] = await Promise.all([
+          fetch("/api/reconciliation/processed", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
+          }),
+          fetch("/api/reconciliation/dismissals", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
+          }),
+          fetch("/api/reconciliation/claims", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }),
+          fetch("/api/reconciliation/transfer-claims", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }),
+          fetch("/api/reconciliation/claims", { cache: "no-store" }),
+          fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+        ]);
 
-        if (!processedRes.ok || !claimsRes.ok || !transferClaimsRes.ok) {
+        if (!processedRes.ok || !dismissalsRes.ok || !claimsRes.ok || !transferClaimsRes.ok) {
           const err = await processedRes
             .json()
-            .catch(async () => claimsRes.json().catch(async () => transferClaimsRes.json().catch(() => ({
-              error: "Failed to disconnect matched transaction.",
-            }))));
+            .catch(async () =>
+              dismissalsRes.json().catch(async () =>
+                claimsRes.json().catch(async () =>
+                  transferClaimsRes.json().catch(() => ({
+                    error: "Failed to disconnect matched transaction.",
+                  })),
+                ),
+              ),
+            );
           throw new Error(err.error || "Failed to disconnect matched transaction.");
         }
 
@@ -996,9 +1041,9 @@ export default function ReconcilePage() {
           next.delete(tx.hash);
           return next;
         });
-        setDismissedIds((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
+        setDismissalNotesById((prev) => {
+          const next = { ...prev };
+          delete next[id];
           return next;
         });
         setDisconnectedIds((prev) => new Set(prev).add(id));
@@ -1286,14 +1331,25 @@ export default function ReconcilePage() {
         claimedCount?: number;
         isComplete?: boolean;
       };
-      setTransferClaimStatusByRowId((prev) => ({
-        ...prev,
-        [transferRowId]: {
-          expectedLegs: payload.expectedLegs === 1 ? 1 : 2,
-          claimedCount: Number(payload.claimedCount ?? 1),
-          isComplete: Boolean(payload.isComplete),
-        },
-      }));
+      const refreshedTransferClaimsRes = await fetch("/api/reconciliation/transfer-claims", {
+        cache: "no-store",
+      });
+      if (refreshedTransferClaimsRes.ok) {
+        const transferClaimsData = (await refreshedTransferClaimsRes.json()) as {
+          statusByRowId?: TransferClaimStatusByRowId;
+        };
+        setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+      } else {
+        // Fallback to optimistic local patch when refresh endpoint is unavailable.
+        setTransferClaimStatusByRowId((prev) => ({
+          ...prev,
+          [transferRowId]: {
+            expectedLegs: payload.expectedLegs === 1 ? 1 : 2,
+            claimedCount: Number(payload.claimedCount ?? 1),
+            isComplete: Boolean(payload.isComplete),
+          },
+        }));
+      }
       setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
@@ -1324,16 +1380,22 @@ export default function ReconcilePage() {
           throw new Error("CSV file has no data rows.");
         }
 
-        const [sheetRows, sheetTransfers, processedHashesRes, claimsRes, transferClaimsRes] = await Promise.all([
-          getExpenses(),
-          getTransfers(),
-          fetch("/api/reconciliation/processed", { cache: "no-store" }),
-          fetch("/api/reconciliation/claims", { cache: "no-store" }),
-          fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
-        ]);
+        const [sheetRows, sheetTransfers, processedHashesRes, dismissalsRes, claimsRes, transferClaimsRes] =
+          await Promise.all([
+            getExpenses(),
+            getTransfers(),
+            fetch("/api/reconciliation/processed", { cache: "no-store" }),
+            fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+            fetch("/api/reconciliation/claims", { cache: "no-store" }),
+            fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+          ]);
         if (!processedHashesRes.ok) {
           const err = await processedHashesRes.json().catch(() => ({ error: processedHashesRes.statusText }));
           throw new Error(err.error || "Failed to load processed hashes.");
+        }
+        if (!dismissalsRes.ok) {
+          const err = await dismissalsRes.json().catch(() => ({ error: dismissalsRes.statusText }));
+          throw new Error(err.error || "Failed to load dismissals.");
         }
         if (!claimsRes.ok) {
           const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
@@ -1345,6 +1407,14 @@ export default function ReconcilePage() {
         }
         const processedHashesData = (await processedHashesRes.json()) as { hashes?: string[] };
         const processedHashes = processedHashesData.hashes ?? [];
+        const dismissalsData = (await dismissalsRes.json()) as {
+          dismissals?: Array<{ hash: string; accountName: string; note: string }>;
+        };
+        const dismissalMap: Record<string, string> = {};
+        for (const d of dismissalsData.dismissals ?? []) {
+          dismissalMap[`${d.accountName}|${d.hash}`] = d.note;
+        }
+        setDismissalNotesById(dismissalMap);
         const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
         const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
         const transferClaimsData = (await transferClaimsRes.json()) as {
@@ -1881,10 +1951,10 @@ export default function ReconcilePage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleDismiss(match)}
+                                onClick={() => openDismissModal(match)}
                                 className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
-                                aria-label="Dismiss"
-                                title="Dismiss"
+                                aria-label="Dismiss with note"
+                                title="Dismiss with note"
                               >
                                 <X className="w-4 h-4" />
                               </button>
@@ -1930,13 +2000,15 @@ export default function ReconcilePage() {
                   <div className="space-y-2">
                     {activeMatchedRows.map((match, index) => {
                       const tx = match.bankTransaction;
+                      const rowId = idForTx(tx);
+                      const dismissalNote = dismissalNotesById[rowId];
                       const link = buildSheetLink(match.matchedSheetIndex);
                       const hasLinkedEntry = Boolean(
                         match.matchedSheetExpense || match.matchedSheetTransfer,
                       );
                       return (
                         <div
-                          key={`${idForTx(tx)}-${index}`}
+                          key={`${rowId}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
                           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
@@ -1950,56 +2022,79 @@ export default function ReconcilePage() {
                               </p>
                             </div>
                             <div className="min-w-0">
-                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                User-inputted Entry
-                              </p>
-                              {match.matchedSheetExpense ? (
+                              {dismissalNote ? (
                                 <>
-                                  <p className="text-green-300 text-sm truncate">
-                                    {match.matchedSheetExpense.description || "—"}
+                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                    Statement line (not sheet)
                                   </p>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
-                                    {fmtDate(
-                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
-                                    )}{" "}
-                                    • {fmtMoney(match.matchedSheetExpense.amount)}
-                                    {match.matchedSheetExpense.account
-                                      ? ` • ${match.matchedSheetExpense.account}`
-                                      : ""}
+                                  <p className="text-gray-200 text-sm whitespace-pre-wrap break-words">
+                                    {tx.description || "—"}
                                   </p>
-                                </>
-                              ) : match.matchedSheetTransfer ? (
-                                <>
-                                  <p className="text-green-300 text-sm truncate">
-                                    {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
-                                    {(match.matchedSheetTransfer.transferTo ?? "—")}
+                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mt-2 mb-1">
+                                    Your note
                                   </p>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    Transfer •{" "}
-                                    {fmtDate(
-                                      match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
-                                    )}{" "}
-                                    • {fmtMoney(match.matchedSheetTransfer.amount)}
+                                  <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                                    {dismissalNote}
                                   </p>
                                 </>
                               ) : (
-                                <p className="text-xs text-gray-500">No linked user-inputted entry</p>
+                                <>
+                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                    User-inputted Entry
+                                  </p>
+                                  {match.matchedSheetExpense ? (
+                                    <>
+                                      <p className="text-green-300 text-sm truncate">
+                                        {match.matchedSheetExpense.description || "—"}
+                                      </p>
+                                      <p className="text-xs text-gray-400 mt-0.5">
+                                        {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                        {fmtDate(
+                                          match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+                                        )}{" "}
+                                        • {fmtMoney(match.matchedSheetExpense.amount)}
+                                        {match.matchedSheetExpense.account
+                                          ? ` • ${match.matchedSheetExpense.account}`
+                                          : ""}
+                                      </p>
+                                    </>
+                                  ) : match.matchedSheetTransfer ? (
+                                    <>
+                                      <p className="text-green-300 text-sm truncate">
+                                        {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                        {(match.matchedSheetTransfer.transferTo ?? "—")}
+                                      </p>
+                                      <p className="text-xs text-gray-400 mt-0.5">
+                                        Transfer •{" "}
+                                        {fmtDate(
+                                          match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
+                                        )}{" "}
+                                        • {fmtMoney(match.matchedSheetTransfer.amount)}
+                                      </p>
+                                    </>
+                                  ) : (
+                                    <p className="text-xs text-gray-500">No linked user-inputted entry</p>
+                                  )}
+                                </>
                               )}
                             </div>
                             <div className="text-right shrink-0">
-                              <div className="text-green-300 text-xs font-medium">
-                                {hasLinkedEntry ? "Matched" : "Processed"}
-                                {hasLinkedEntry && link ? (
+                              <div
+                                className={`text-xs font-medium ${
+                                  dismissalNote ? "text-amber-200/90" : "text-green-300"
+                                }`}
+                              >
+                                {dismissalNote ? "Dismissed" : hasLinkedEntry ? "Matched" : "Processed"}
+                                {!dismissalNote && hasLinkedEntry && link ? (
                                   <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
                                     Sheet entry
                                   </Link>
-                                ) : hasLinkedEntry ? (
+                                ) : !dismissalNote && hasLinkedEntry ? (
                                   <Link href="/budget" className="ml-2 underline text-blue-300">
                                     Budget entry
                                   </Link>
                                 ) : null}
-                                {!hasLinkedEntry ? (
+                                {!dismissalNote && !hasLinkedEntry ? (
                                   <span className="ml-2 text-gray-400">No linked entry</span>
                                 ) : null}
                               </div>
@@ -2007,7 +2102,7 @@ export default function ReconcilePage() {
                                 <button
                                   type="button"
                                   onClick={() => handleDisconnect(match)}
-                                  disabled={processingId === idForTx(tx)}
+                                  disabled={processingId === rowId}
                                   className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
                                   title="Disconnect match and allow rematch"
                                 >
@@ -2109,6 +2204,78 @@ export default function ReconcilePage() {
               >
                 {quickAdd.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {dismissModal.open && dismissModal.match && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeDismissModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dismiss-statement-title"
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <h2 id="dismiss-statement-title" className="text-white font-semibold">
+                Dismiss statement line
+              </h2>
+              <button
+                type="button"
+                onClick={closeDismissModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
+                <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Bank</p>
+                <p className="text-gray-100 truncate">
+                  {dismissModal.match.bankTransaction.description || "—"}
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {dismissModal.match.bankTransaction.accountName} •{" "}
+                  {fmtDate(dismissModal.match.bankTransaction.date)} •{" "}
+                  {fmtMoney(dismissModal.match.bankTransaction.amount)}
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Note (saved to Neon)</label>
+                <textarea
+                  value={dismissModal.note}
+                  onChange={(e) =>
+                    setDismissModal((prev) => ({ ...prev, note: e.target.value, error: "" }))
+                  }
+                  rows={4}
+                  placeholder="e.g. Paid for group dinner; reimbursed on Venmo."
+                  className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none resize-y min-h-[96px]"
+                />
+              </div>
+              {dismissModal.error && <p className="text-xs text-red-400">{dismissModal.error}</p>}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeDismissModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDismissSubmit()}
+                disabled={dismissModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-amber-700/90 text-white hover:bg-amber-700 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {dismissModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Save dismissal
               </button>
             </div>
           </div>
