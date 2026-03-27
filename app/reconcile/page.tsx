@@ -1436,8 +1436,9 @@ export default function ReconcilePage() {
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="space-y-4">
               <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                   <h2 className="text-white font-semibold">User-inputted: Unmatched / Questionable</h2>
+                  <span className="text-xs text-gray-300">{userInputtedReviewRows.length}</span>
                 </div>
                 <div className="p-3 text-sm">
                   {userInputtedReviewRows.length === 0 ? (
@@ -1461,8 +1462,9 @@ export default function ReconcilePage() {
               </section>
 
               <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                   <h2 className="text-white font-semibold">User-inputted: Completed</h2>
+                  <span className="text-xs text-gray-300">{userInputtedCompletedRows.length}</span>
                 </div>
                 <div className="p-3 text-sm">
                   {userInputtedCompletedRows.length === 0 ? (
@@ -1487,8 +1489,20 @@ export default function ReconcilePage() {
             </div>
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">Statement Accounts: Suggested + Auto-matched</h2>
+                <span className="text-xs text-gray-300">
+                  Suggested{" "}
+                  {tabAccounts.reduce(
+                    (sum, account) => sum + (statementSuggestedRowsByAccount[account]?.length ?? 0),
+                    0,
+                  )}{" "}
+                  • Matched{" "}
+                  {tabAccounts.reduce(
+                    (sum, account) => sum + (statementAutoMatchedRowsByAccount[account]?.length ?? 0),
+                    0,
+                  )}
+                </span>
               </div>
               <div className="p-3 text-sm space-y-3">
                 {tabAccounts.map((account) => {
@@ -1569,6 +1583,7 @@ export default function ReconcilePage() {
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">{activeTab}: Unmatched / Suggested</h2>
+                <span className="text-xs text-gray-300">{activeReviewRows.length}</span>
                 <button
                   type="button"
                   onClick={() => setViewMode("home")}
@@ -1704,8 +1719,9 @@ export default function ReconcilePage() {
             </section>
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">{activeTab}: Auto-matched</h2>
+                <span className="text-xs text-gray-300">{activeAutoMatchedRows.length}</span>
               </div>
               <div className="p-3 text-sm">
                 {activeAutoMatchedRows.length === 0 ? (
@@ -1761,8 +1777,9 @@ export default function ReconcilePage() {
             </section>
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">{activeTab}: Manually Completed / Matched</h2>
+                <span className="text-xs text-gray-300">{activeCompletedRows.length}</span>
               </div>
               <div className="p-3 text-sm">
                 {activeCompletedRows.length === 0 ? (
