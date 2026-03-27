@@ -168,6 +168,10 @@ function isStatementManualReview(match: MatchResult): boolean {
   );
 }
 
+function hasLinkedUserInputtedEntry(match: MatchResult): boolean {
+  return Boolean(match.matchedSheetExpense || match.matchedSheetTransfer);
+}
+
 function accountHasConfiguredParser(account: string): boolean {
   return CSV_PARSER_READY_ACCOUNTS.has(account as AccountOption);
 }
@@ -508,7 +512,10 @@ export default function ReconcilePage() {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (disconnectedIds.has(id)) return false;
-        return processedHashes.has(match.bankTransaction.hash) && match.matchType !== "exact_match";
+        return (
+          processedHashes.has(match.bankTransaction.hash) &&
+          (match.matchType !== "exact_match" || !hasLinkedUserInputtedEntry(match))
+        );
       });
     });
     return byAccount;
@@ -538,7 +545,7 @@ export default function ReconcilePage() {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (dismissedIds.has(id) || disconnectedIds.has(id)) return false;
-        return match.matchType === "exact_match";
+        return match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match);
       });
     });
     return byAccount;
@@ -1254,7 +1261,9 @@ export default function ReconcilePage() {
           throw new Error(err.error || `Failed to match CSV (${res.status})`);
         }
         const data = (await res.json()) as MatchResponse;
-        const autoApprovable = data.matches.filter((match) => match.matchType === "exact_match");
+        const autoApprovable = data.matches.filter(
+          (match) => match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match),
+        );
         const autoApprovedHashes: string[] = [];
         const autoApprovalErrors: string[] = [];
         await Promise.all(
