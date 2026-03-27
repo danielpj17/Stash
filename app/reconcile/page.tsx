@@ -142,6 +142,46 @@ function idForTx(tx: BankTransaction): string {
   return `${tx.accountName}|${tx.hash}`;
 }
 
+/** Legacy bucket: CSV used BANK_PROFILES key "Wells Fargo"; UI accounts are WF Checking / WF Savings only. */
+const LEGACY_WF_PROFILE_BUCKET = "Wells Fargo";
+
+function mergeWellsFargoBucketIntoChecking(
+  prev: Record<string, MatchResult[]>,
+): Record<string, MatchResult[]> {
+  const legacy = prev[LEGACY_WF_PROFILE_BUCKET];
+  if (legacy === undefined) return prev;
+  if (!legacy.length) {
+    const next = { ...prev };
+    delete next[LEGACY_WF_PROFILE_BUCKET];
+    return next;
+  }
+
+  const checkingKey: AccountOption = "WF Checking";
+  const retagged = legacy.map((m) => ({
+    ...m,
+    bankTransaction: {
+      ...m.bankTransaction,
+      accountName: checkingKey,
+    },
+  }));
+
+  const existing = prev[checkingKey] ?? [];
+  const byHash = new Map<string, MatchResult>();
+  for (const row of existing) {
+    byHash.set(row.bankTransaction.hash, row);
+  }
+  for (const row of retagged) {
+    if (!byHash.has(row.bankTransaction.hash)) {
+      byHash.set(row.bankTransaction.hash, row);
+    }
+  }
+
+  const next: Record<string, MatchResult[]> = { ...prev };
+  delete next[LEGACY_WF_PROFILE_BUCKET];
+  next[checkingKey] = Array.from(byHash.values());
+  return next;
+}
+
 function fmtMoney(amount: number): string {
   return amount.toLocaleString("en-US", {
     style: "currency",
@@ -333,12 +373,16 @@ export default function ReconcilePage() {
         typeof parsed.matchesByAccount === "object" &&
         !Array.isArray(parsed.matchesByAccount)
       ) {
-        setMatchesByAccount(parsed.matchesByAccount);
+        setMatchesByAccount(mergeWellsFargoBucketIntoChecking(parsed.matchesByAccount));
       }
     } catch {
       // Ignore corrupted local storage and continue with empty in-memory state.
     }
   }, []);
+
+  useEffect(() => {
+    setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking(prev));
+  }, [matchesByAccount[LEGACY_WF_PROFILE_BUCKET]?.length]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -489,17 +533,20 @@ export default function ReconcilePage() {
 
   const allMatches = useMemo(() => Object.values(matchesByAccount).flat(), [matchesByAccount]);
 
-  const tabAccounts = useMemo(
-    () => {
-      const uploaded = Object.keys(matchesByAccount);
-      const merged = [...ACCOUNT_OPTIONS];
-      for (const account of uploaded) {
-        if (!merged.includes(account as AccountOption)) merged.push(account as AccountOption);
-      }
-      return merged;
-    },
-    [matchesByAccount],
-  );
+  const tabAccounts = useMemo(() => {
+    const uploaded = Object.keys(matchesByAccount).filter((a) => a !== LEGACY_WF_PROFILE_BUCKET);
+    const merged = [...ACCOUNT_OPTIONS];
+    for (const account of uploaded) {
+      if (!merged.includes(account as AccountOption)) merged.push(account as AccountOption);
+    }
+    return merged;
+  }, [matchesByAccount]);
+
+  useEffect(() => {
+    if (activeTab === LEGACY_WF_PROFILE_BUCKET) {
+      setActiveTab("WF Checking");
+    }
+  }, [activeTab]);
 
   const statementRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};

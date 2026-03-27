@@ -11,7 +11,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const PROFILE_BY_ACCOUNT: Record<string, string> = {
-  "Wells Fargo": "Wells Fargo",
   "WF Checking": "Wells Fargo",
   "WF Savings": "Wells Fargo",
   Fidelity: "Fidelity",
