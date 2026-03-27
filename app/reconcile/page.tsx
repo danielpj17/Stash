@@ -246,6 +246,7 @@ export default function ReconcilePage() {
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const [approvedIds, setApprovedIds] = useState<Set<string>>(new Set());
+  const [disconnectedIds, setDisconnectedIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState("");
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [sheetExpenses, setSheetExpenses] = useState<SheetRow[]>([]);
@@ -297,6 +298,7 @@ export default function ReconcilePage() {
         matchesByAccount?: Record<string, MatchResult[]>;
         dismissedIds?: string[];
         approvedIds?: string[];
+        disconnectedIds?: string[];
       };
 
       if (
@@ -321,6 +323,9 @@ export default function ReconcilePage() {
       if (Array.isArray(parsed.approvedIds)) {
         setApprovedIds(new Set(parsed.approvedIds.map((id) => String(id))));
       }
+      if (Array.isArray(parsed.disconnectedIds)) {
+        setDisconnectedIds(new Set(parsed.disconnectedIds.map((id) => String(id))));
+      }
     } catch {
       // Ignore corrupted local storage and continue with empty in-memory state.
     }
@@ -334,13 +339,14 @@ export default function ReconcilePage() {
       matchesByAccount,
       dismissedIds: Array.from(dismissedIds),
       approvedIds: Array.from(approvedIds),
+      disconnectedIds: Array.from(disconnectedIds),
     };
     try {
       window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage quota/security errors; page still works in-memory.
     }
-  }, [activeTab, approvedIds, dismissedIds, matchesByAccount, selectedAccount]);
+  }, [activeTab, approvedIds, disconnectedIds, dismissedIds, matchesByAccount, selectedAccount]);
 
   useEffect(() => {
     let cancelled = false;
@@ -409,29 +415,60 @@ export default function ReconcilePage() {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (dismissedIds.has(id) || approvedIds.has(id)) return false;
-        return isStatementManualReview(match);
+        return isStatementManualReview(match) || disconnectedIds.has(id);
       });
     });
     return byAccount;
-  }, [dismissedIds, approvedIds, statementRowsByAccount, tabAccounts]);
+  }, [dismissedIds, approvedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementCompletedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        return match.matchType === "exact_match" || approvedIds.has(id);
+        if (disconnectedIds.has(id)) return false;
+        return approvedIds.has(id) && match.matchType !== "exact_match";
       });
     });
     return byAccount;
-  }, [approvedIds, statementRowsByAccount, tabAccounts]);
+  }, [approvedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
+
+  const statementSuggestedRowsByAccount = useMemo(() => {
+    const byAccount: Record<string, MatchResult[]> = {};
+    tabAccounts.forEach((account) => {
+      byAccount[account] = statementRowsByAccount[account].filter((match) => {
+        const id = idForTx(match.bankTransaction);
+        if (dismissedIds.has(id) || approvedIds.has(id) || disconnectedIds.has(id)) return false;
+        return match.matchType === "questionable_match_fuzzy" || match.matchType === "transfer";
+      });
+    });
+    return byAccount;
+  }, [approvedIds, disconnectedIds, dismissedIds, statementRowsByAccount, tabAccounts]);
+
+  const statementAutoMatchedRowsByAccount = useMemo(() => {
+    const byAccount: Record<string, MatchResult[]> = {};
+    tabAccounts.forEach((account) => {
+      byAccount[account] = statementRowsByAccount[account].filter((match) => {
+        const id = idForTx(match.bankTransaction);
+        if (dismissedIds.has(id) || disconnectedIds.has(id)) return false;
+        return match.matchType === "exact_match";
+      });
+    });
+    return byAccount;
+  }, [dismissedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const accountDetailRows = useMemo(
     () => [
       ...(statementReviewRowsByAccount[activeTab] ?? []),
+      ...(statementAutoMatchedRowsByAccount[activeTab] ?? []),
       ...(statementCompletedRowsByAccount[activeTab] ?? []),
     ],
-    [activeTab, statementCompletedRowsByAccount, statementReviewRowsByAccount],
+    [
+      activeTab,
+      statementAutoMatchedRowsByAccount,
+      statementCompletedRowsByAccount,
+      statementReviewRowsByAccount,
+    ],
   );
 
   const autoCompletedExpenseSignatures = useMemo(() => {
@@ -748,6 +785,11 @@ export default function ReconcilePage() {
       try {
         await persistProcessedHash(tx);
         setApprovedIds((prev) => new Set(prev).add(id));
+        setDisconnectedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       } catch (err) {
         setActionError(err instanceof Error ? err.message : "Failed to approve transaction.");
       } finally {
@@ -761,6 +803,98 @@ export default function ReconcilePage() {
     const id = idForTx(match.bankTransaction);
     setDismissedIds((prev) => new Set(prev).add(id));
   }, []);
+
+  const handleDisconnect = useCallback(
+    async (match: MatchResult) => {
+      const tx = match.bankTransaction;
+      const id = idForTx(tx);
+      setActionError("");
+      setProcessingId(id);
+      try {
+        const payload = {
+          bankTransaction: {
+            hash: tx.hash,
+            accountName: tx.accountName,
+          },
+        };
+        const [processedRes, claimsRes, transferClaimsRes, refreshedClaimsRes, refreshedTransferRes] =
+          await Promise.all([
+            fetch("/api/reconciliation/processed", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
+            }),
+            fetch("/api/reconciliation/claims", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }),
+            fetch("/api/reconciliation/transfer-claims", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }),
+            fetch("/api/reconciliation/claims", { cache: "no-store" }),
+            fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+          ]);
+
+        if (!processedRes.ok || !claimsRes.ok || !transferClaimsRes.ok) {
+          const err = await processedRes
+            .json()
+            .catch(async () => claimsRes.json().catch(async () => transferClaimsRes.json().catch(() => ({
+              error: "Failed to disconnect matched transaction.",
+            }))));
+          throw new Error(err.error || "Failed to disconnect matched transaction.");
+        }
+
+        if (refreshedClaimsRes.ok) {
+          const claimsData = (await refreshedClaimsRes.json()) as { claimedRowIds?: string[] };
+          setClaimedRowKeys(new Set((claimsData.claimedRowIds ?? []).map((rowId) => String(rowId))));
+        }
+        if (refreshedTransferRes.ok) {
+          const transferClaimsData = (await refreshedTransferRes.json()) as {
+            statusByRowId?: TransferClaimStatusByRowId;
+          };
+          setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+        }
+
+        setApprovedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setDismissedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setDisconnectedIds((prev) => new Set(prev).add(id));
+        setMatchesByAccount((prev) => {
+          const next: Record<string, MatchResult[]> = {};
+          for (const [account, rows] of Object.entries(prev)) {
+            next[account] = rows.map((row) => {
+              if (idForTx(row.bankTransaction) !== id) return row;
+              return {
+                ...row,
+                matchType: "unmatched",
+                reason: "Match removed manually; ready for rematch.",
+                matchedSheetExpense: undefined,
+                matchedSheetTransfer: undefined,
+                matchedSheetIndex: undefined,
+                matchedSheetTransferIndex: undefined,
+              };
+            });
+          }
+          return next;
+        });
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Failed to disconnect match.");
+      } finally {
+        setProcessingId(null);
+      }
+    },
+    [],
+  );
 
   const handleQuickAddSubmit = useCallback(async () => {
     if (!quickAdd.rowId) return;
@@ -789,6 +923,11 @@ export default function ReconcilePage() {
       });
       await persistProcessedHash(selected.bankTransaction);
       setApprovedIds((prev) => new Set(prev).add(quickAdd.rowId as string));
+      setDisconnectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(quickAdd.rowId as string);
+        return next;
+      });
       closeQuickAdd();
     } catch (err) {
       setQuickAdd((prev) => ({
@@ -888,6 +1027,11 @@ export default function ReconcilePage() {
         return next;
       });
       setApprovedIds((prev) => new Set(prev).add(splitModal.rowId as string));
+      setDisconnectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(splitModal.rowId as string);
+        return next;
+      });
       closeSplitModal();
     } catch (err) {
       setSplitModal((prev) => ({
@@ -947,6 +1091,11 @@ export default function ReconcilePage() {
         },
       }));
       setApprovedIds((prev) => new Set(prev).add(transferClaimModal.rowId as string));
+      setDisconnectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(transferClaimModal.rowId as string);
+        return next;
+      });
       closeTransferClaimModal();
     } catch (err) {
       setTransferClaimModal((prev) => ({
@@ -1067,6 +1216,9 @@ export default function ReconcilePage() {
   });
 
   const activeReviewRows = (statementReviewRowsByAccount[activeTab] ?? []).filter(
+    (row) => row.bankTransaction.accountName === activeTab,
+  );
+  const activeAutoMatchedRows = (statementAutoMatchedRowsByAccount[activeTab] ?? []).filter(
     (row) => row.bankTransaction.accountName === activeTab,
   );
   const activeCompletedRows = (statementCompletedRowsByAccount[activeTab] ?? []).filter(
@@ -1205,12 +1357,14 @@ export default function ReconcilePage() {
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-                <h2 className="text-white font-semibold">Statement Accounts: Unmatched / Questionable</h2>
+                <h2 className="text-white font-semibold">Statement Accounts: Suggested + Auto-matched</h2>
               </div>
               <div className="p-3 text-sm space-y-3">
                 {tabAccounts.map((account) => {
-                  const rows = statementReviewRowsByAccount[account] ?? [];
-                  const remainingCount = rows.length > 3 ? rows.length - 3 : 0;
+                  const suggestedRows = statementSuggestedRowsByAccount[account] ?? [];
+                  const autoRows = statementAutoMatchedRowsByAccount[account] ?? [];
+                  const suggestedRemaining = suggestedRows.length > 3 ? suggestedRows.length - 3 : 0;
+                  const autoRemaining = autoRows.length > 3 ? autoRows.length - 3 : 0;
                   const hasParser = accountHasConfiguredParser(account);
                   return (
                     <div
@@ -1234,23 +1388,42 @@ export default function ReconcilePage() {
                         </button>
                       </div>
                       <p className="text-xs text-gray-400 mt-1">
-                        {rows.length} row{rows.length === 1 ? "" : "s"} needing review
+                        Suggested: {suggestedRows.length} • Auto-matched: {autoRows.length}
                       </p>
-                      {rows.length === 0 && !hasParser && (
+                      {suggestedRows.length === 0 && autoRows.length === 0 && !hasParser && (
                         <p className="text-[11px] text-yellow-300/90 mt-1">
                           Statement CSV parser not configured yet for this account.
                         </p>
                       )}
-                      {rows.length > 0 && (
+                      {suggestedRows.length > 0 && (
                         <div className="mt-2 space-y-1.5">
-                          {rows.slice(0, 3).map((match, idx) => (
+                          <p className="text-[11px] uppercase tracking-wide text-yellow-300/90">
+                            Suggested
+                          </p>
+                          {suggestedRows.slice(0, 3).map((match, idx) => (
                             <div key={`${idForTx(match.bankTransaction)}-${idx}`} className="text-xs text-gray-300">
                               {fmtDate(match.bankTransaction.date)} • {match.bankTransaction.description || "—"} •{" "}
                               {fmtMoney(match.bankTransaction.amount)}
                             </div>
                           ))}
-                          {remainingCount > 0 && (
-                            <p className="text-[11px] text-gray-500">+{remainingCount} more</p>
+                          {suggestedRemaining > 0 && (
+                            <p className="text-[11px] text-gray-500">+{suggestedRemaining} more</p>
+                          )}
+                        </div>
+                      )}
+                      {autoRows.length > 0 && (
+                        <div className="mt-2 space-y-1.5">
+                          <p className="text-[11px] uppercase tracking-wide text-green-300/90">
+                            Auto-matched
+                          </p>
+                          {autoRows.slice(0, 3).map((match, idx) => (
+                            <div key={`${idForTx(match.bankTransaction)}-auto-${idx}`} className="text-xs text-gray-300">
+                              {fmtDate(match.bankTransaction.date)} • {match.bankTransaction.description || "—"} •{" "}
+                              {fmtMoney(match.bankTransaction.amount)}
+                            </div>
+                          ))}
+                          {autoRemaining > 0 && (
+                            <p className="text-[11px] text-gray-500">+{autoRemaining} more</p>
                           )}
                         </div>
                       )}
@@ -1264,7 +1437,7 @@ export default function ReconcilePage() {
           <>
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">{activeTab}: Unmatched / Questionable</h2>
+                <h2 className="text-white font-semibold">{activeTab}: Unmatched / Suggested</h2>
                 <button
                   type="button"
                   onClick={() => setViewMode("home")}
@@ -1401,7 +1574,64 @@ export default function ReconcilePage() {
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
-                <h2 className="text-white font-semibold">{activeTab}: Completed / Matched</h2>
+                <h2 className="text-white font-semibold">{activeTab}: Auto-matched</h2>
+              </div>
+              <div className="p-3 text-sm">
+                {activeAutoMatchedRows.length === 0 ? (
+                  <p className="text-gray-400">No auto-matched rows for this account yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {activeAutoMatchedRows.map((match, index) => {
+                      const tx = match.bankTransaction;
+                      const id = idForTx(tx);
+                      const link = buildSheetLink(match.matchedSheetIndex);
+                      return (
+                        <div
+                          key={`${id}-auto-${index}`}
+                          className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-gray-200 truncate">{tx.description || "—"}</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0 text-green-300 text-xs font-medium">
+                              Auto-matched
+                              {link ? (
+                                <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
+                                  Sheet entry
+                                </Link>
+                              ) : (
+                                <Link href="/budget" className="ml-2 underline text-blue-300">
+                                  Budget entry
+                                </Link>
+                              )}
+                            </div>
+                          </div>
+                          <div className="mt-2 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleDisconnect(match)}
+                              disabled={processingId === id}
+                              className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
+                              title="Disconnect match and allow rematch"
+                            >
+                              Disconnect
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+                <h2 className="text-white font-semibold">{activeTab}: Manually Completed / Matched</h2>
               </div>
               <div className="p-3 text-sm">
                 {activeCompletedRows.length === 0 ? (
@@ -1436,6 +1666,17 @@ export default function ReconcilePage() {
                               )}
                             </div>
                           </div>
+                          <div className="mt-2 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleDisconnect(match)}
+                              disabled={processingId === idForTx(tx)}
+                              className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
+                              title="Disconnect match and allow rematch"
+                            >
+                              Disconnect
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -1446,8 +1687,8 @@ export default function ReconcilePage() {
 
             {accountDetailRows.length > 0 && (
               <p className="text-xs text-gray-500">
-                Showing {activeReviewRows.length} unmatched/questionable and {activeCompletedRows.length} completed
-                rows for {activeTab}.
+                Showing {activeReviewRows.length} unmatched/suggested, {activeAutoMatchedRows.length} auto-matched,
+                and {activeCompletedRows.length} manually completed rows for {activeTab}.
               </p>
             )}
           </>

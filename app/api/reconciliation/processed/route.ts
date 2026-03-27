@@ -70,3 +70,58 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export async function DELETE(request: NextRequest) {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    return NextResponse.json(
+      { error: "DATABASE_URL not configured" },
+      { status: 503 },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const hash = typeof (body as { hash?: unknown })?.hash === "string"
+    ? (body as { hash: string }).hash.trim()
+    : "";
+  const accountName = typeof (body as { accountName?: unknown })?.accountName === "string"
+    ? (body as { accountName: string }).accountName.trim()
+    : "";
+
+  if (!hash) {
+    return NextResponse.json({ error: "hash is required" }, { status: 400 });
+  }
+
+  try {
+    const sql = neon(connectionString);
+    const rows = accountName
+      ? (await sql`
+          DELETE FROM processed_transactions
+          WHERE hash = ${hash} AND account_name = ${accountName}
+          RETURNING hash
+        `) as Array<{ hash: string }>
+      : (await sql`
+          DELETE FROM processed_transactions
+          WHERE hash = ${hash}
+          RETURNING hash
+        `) as Array<{ hash: string }>;
+
+    return NextResponse.json({
+      success: true,
+      hash,
+      deleted: rows.length,
+    });
+  } catch (err) {
+    console.error("Processed transactions DELETE error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to delete processed hash" },
+      { status: 502 },
+    );
+  }
+}

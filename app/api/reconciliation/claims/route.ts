@@ -191,3 +191,65 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: isConflict ? 409 : 502 });
   }
 }
+
+export async function DELETE(request: NextRequest) {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    return NextResponse.json({ error: "DATABASE_URL not configured" }, { status: 503 });
+  }
+
+  let body: {
+    bankTransaction?: {
+      hash?: unknown;
+      accountName?: unknown;
+    };
+  };
+  try {
+    body = (await request.json()) as {
+      bankTransaction?: {
+        hash?: unknown;
+        accountName?: unknown;
+      };
+    };
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const bankHash = typeof body.bankTransaction?.hash === "string"
+    ? body.bankTransaction.hash.trim()
+    : "";
+  const accountName = typeof body.bankTransaction?.accountName === "string"
+    ? body.bankTransaction.accountName.trim()
+    : "";
+
+  if (!bankHash) {
+    return NextResponse.json({ error: "bankTransaction.hash is required" }, { status: 400 });
+  }
+
+  try {
+    const sql = neon(connectionString);
+    await ensureClaimsTable(sql);
+    const rows = accountName
+      ? (await sql`
+          DELETE FROM reconciliation_claim_links
+          WHERE bank_hash = ${bankHash} AND account_name = ${accountName}
+          RETURNING bank_hash
+        `) as Array<{ bank_hash: string }>
+      : (await sql`
+          DELETE FROM reconciliation_claim_links
+          WHERE bank_hash = ${bankHash}
+          RETURNING bank_hash
+        `) as Array<{ bank_hash: string }>;
+
+    return NextResponse.json({
+      success: true,
+      bankHash,
+      deleted: rows.length,
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to remove reconciliation claim links" },
+      { status: 502 },
+    );
+  }
+}
