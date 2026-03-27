@@ -245,12 +245,13 @@ export default function ReconcilePage() {
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
-  const [approvedIds, setApprovedIds] = useState<Set<string>>(new Set());
+  const [processedHashes, setProcessedHashes] = useState<Set<string>>(new Set());
   const [disconnectedIds, setDisconnectedIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState("");
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [sheetExpenses, setSheetExpenses] = useState<SheetRow[]>([]);
   const [sheetTransfers, setSheetTransfers] = useState<TransferRow[]>([]);
+  const [uploadedFilesByAccount, setUploadedFilesByAccount] = useState<Record<string, string[]>>({});
   const [claimedRowKeys, setClaimedRowKeys] = useState<Set<string>>(new Set());
   const [transferClaimStatusByRowId, setTransferClaimStatusByRowId] =
     useState<TransferClaimStatusByRowId>({});
@@ -297,8 +298,6 @@ export default function ReconcilePage() {
         activeTab?: string;
         matchesByAccount?: Record<string, MatchResult[]>;
         dismissedIds?: string[];
-        approvedIds?: string[];
-        disconnectedIds?: string[];
       };
 
       if (
@@ -320,12 +319,6 @@ export default function ReconcilePage() {
       if (Array.isArray(parsed.dismissedIds)) {
         setDismissedIds(new Set(parsed.dismissedIds.map((id) => String(id))));
       }
-      if (Array.isArray(parsed.approvedIds)) {
-        setApprovedIds(new Set(parsed.approvedIds.map((id) => String(id))));
-      }
-      if (Array.isArray(parsed.disconnectedIds)) {
-        setDisconnectedIds(new Set(parsed.disconnectedIds.map((id) => String(id))));
-      }
     } catch {
       // Ignore corrupted local storage and continue with empty in-memory state.
     }
@@ -338,15 +331,103 @@ export default function ReconcilePage() {
       activeTab,
       matchesByAccount,
       dismissedIds: Array.from(dismissedIds),
-      approvedIds: Array.from(approvedIds),
-      disconnectedIds: Array.from(disconnectedIds),
     };
     try {
       window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage quota/security errors; page still works in-memory.
     }
-  }, [activeTab, approvedIds, disconnectedIds, dismissedIds, matchesByAccount, selectedAccount]);
+  }, [
+    activeTab,
+    dismissedIds,
+    matchesByAccount,
+    selectedAccount,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProcessedHashes() {
+      try {
+        const res = await fetch("/api/reconciliation/processed", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { hashes?: string[] };
+        if (cancelled) return;
+        setProcessedHashes(new Set((data.hashes ?? []).map((hash) => String(hash))));
+      } catch {
+        // Keep in-memory defaults if fetch fails.
+      }
+    }
+
+    void loadProcessedHashes();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUploadedFilesFromNeon() {
+      try {
+        const res = await fetch("/api/reconciliation/uploaded-files", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { filesByAccount?: Record<string, string[]> };
+        if (cancelled) return;
+        setUploadedFilesByAccount(data.filesByAccount ?? {});
+      } catch {
+        // Non-critical UI history can stay empty if unavailable.
+      }
+    }
+
+    async function migrateLegacyLocalUploadedFiles() {
+      if (typeof window === "undefined") return;
+      const migrationKey = "reconcile-uploaded-files-migrated-v1";
+      if (window.localStorage.getItem(migrationKey) === "1") return;
+      try {
+        const raw = window.localStorage.getItem(RECONCILE_STORAGE_KEY);
+        if (!raw) {
+          window.localStorage.setItem(migrationKey, "1");
+          return;
+        }
+        const parsed = JSON.parse(raw) as { uploadedFilesByAccount?: Record<string, unknown> };
+        const legacy = parsed.uploadedFilesByAccount;
+        if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) {
+          window.localStorage.setItem(migrationKey, "1");
+          return;
+        }
+
+        const writes: Promise<Response>[] = [];
+        for (const [accountName, files] of Object.entries(legacy)) {
+          if (!Array.isArray(files)) continue;
+          for (const file of files) {
+            const fileName = String(file).trim();
+            if (!fileName) continue;
+            writes.push(
+              fetch("/api/reconciliation/uploaded-files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ accountName, fileName }),
+              }),
+            );
+          }
+        }
+        if (writes.length > 0) {
+          await Promise.all(writes);
+          await loadUploadedFilesFromNeon();
+        }
+        window.localStorage.setItem(migrationKey, "1");
+      } catch {
+        // Retry migration next load if parsing/network fails.
+      }
+    }
+
+    void loadUploadedFilesFromNeon();
+    void migrateLegacyLocalUploadedFiles();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -414,12 +495,12 @@ export default function ReconcilePage() {
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        if (dismissedIds.has(id) || approvedIds.has(id)) return false;
+        if (dismissedIds.has(id) || processedHashes.has(match.bankTransaction.hash)) return false;
         return isStatementManualReview(match) || disconnectedIds.has(id);
       });
     });
     return byAccount;
-  }, [dismissedIds, approvedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [dismissedIds, processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementCompletedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
@@ -427,23 +508,29 @@ export default function ReconcilePage() {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (disconnectedIds.has(id)) return false;
-        return approvedIds.has(id) && match.matchType !== "exact_match";
+        return processedHashes.has(match.bankTransaction.hash) && match.matchType !== "exact_match";
       });
     });
     return byAccount;
-  }, [approvedIds, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
   const statementSuggestedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        if (dismissedIds.has(id) || approvedIds.has(id) || disconnectedIds.has(id)) return false;
+        if (
+          dismissedIds.has(id) ||
+          processedHashes.has(match.bankTransaction.hash) ||
+          disconnectedIds.has(id)
+        ) {
+          return false;
+        }
         return match.matchType === "questionable_match_fuzzy" || match.matchType === "transfer";
       });
     });
     return byAccount;
-  }, [approvedIds, disconnectedIds, dismissedIds, statementRowsByAccount, tabAccounts]);
+  }, [processedHashes, disconnectedIds, dismissedIds, statementRowsByAccount, tabAccounts]);
 
   const statementAutoMatchedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
@@ -475,7 +562,7 @@ export default function ReconcilePage() {
     const signatures = new Set<string>();
     for (const match of allMatches) {
       const id = idForTx(match.bankTransaction);
-      const isCompleted = match.matchType === "exact_match" || approvedIds.has(id);
+      const isCompleted = match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
       if (!isCompleted || !match.matchedSheetExpense) continue;
       signatures.add(
         buildExpenseSignature(
@@ -486,13 +573,13 @@ export default function ReconcilePage() {
       );
     }
     return signatures;
-  }, [allMatches, approvedIds]);
+  }, [allMatches, processedHashes]);
 
   const autoCompletedTransferSignatures = useMemo(() => {
     const signatures = new Set<string>();
     for (const match of allMatches) {
       const id = idForTx(match.bankTransaction);
-      const isCompleted = match.matchType === "exact_match" || approvedIds.has(id);
+      const isCompleted = match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
       if (!isCompleted || !match.matchedSheetTransfer) continue;
       signatures.add(
         buildTransferSignature(
@@ -504,7 +591,7 @@ export default function ReconcilePage() {
       );
     }
     return signatures;
-  }, [allMatches, approvedIds]);
+  }, [allMatches, processedHashes]);
 
   const userInputtedEntries = useMemo(() => {
     const expenseEntries: UserInputtedEntry[] = sheetExpenses.map((row, index) => {
@@ -784,7 +871,7 @@ export default function ReconcilePage() {
       setProcessingId(id);
       try {
         await persistProcessedHash(tx);
-        setApprovedIds((prev) => new Set(prev).add(id));
+        setProcessedHashes((prev) => new Set(prev).add(tx.hash));
         setDisconnectedIds((prev) => {
           const next = new Set(prev);
           next.delete(id);
@@ -858,9 +945,9 @@ export default function ReconcilePage() {
           setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
         }
 
-        setApprovedIds((prev) => {
+        setProcessedHashes((prev) => {
           const next = new Set(prev);
-          next.delete(id);
+          next.delete(tx.hash);
           return next;
         });
         setDismissedIds((prev) => {
@@ -922,7 +1009,7 @@ export default function ReconcilePage() {
         description: quickAdd.description.trim(),
       });
       await persistProcessedHash(selected.bankTransaction);
-      setApprovedIds((prev) => new Set(prev).add(quickAdd.rowId as string));
+      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(quickAdd.rowId as string);
@@ -1026,7 +1113,7 @@ export default function ReconcilePage() {
         selectedRows.forEach((row) => next.add(row.key));
         return next;
       });
-      setApprovedIds((prev) => new Set(prev).add(splitModal.rowId as string));
+      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(splitModal.rowId as string);
@@ -1090,7 +1177,7 @@ export default function ReconcilePage() {
           isComplete: Boolean(payload.isComplete),
         },
       }));
-      setApprovedIds((prev) => new Set(prev).add(transferClaimModal.rowId as string));
+      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(transferClaimModal.rowId as string);
@@ -1168,13 +1255,13 @@ export default function ReconcilePage() {
         }
         const data = (await res.json()) as MatchResponse;
         const autoApprovable = data.matches.filter((match) => match.matchType === "exact_match");
-        const autoApprovedIds: string[] = [];
+        const autoApprovedHashes: string[] = [];
         const autoApprovalErrors: string[] = [];
         await Promise.all(
           autoApprovable.map(async (match) => {
             try {
               await persistProcessedHash(match.bankTransaction);
-              autoApprovedIds.push(idForTx(match.bankTransaction));
+              autoApprovedHashes.push(match.bankTransaction.hash);
             } catch (err) {
               autoApprovalErrors.push(
                 err instanceof Error
@@ -1189,15 +1276,34 @@ export default function ReconcilePage() {
           ...prev,
           [selectedAccount]: data.matches,
         }));
-        if (autoApprovedIds.length > 0) {
-          setApprovedIds((prev) => {
+        if (autoApprovedHashes.length > 0) {
+          setProcessedHashes((prev) => {
             const next = new Set(prev);
-            autoApprovedIds.forEach((id) => next.add(id));
+            autoApprovedHashes.forEach((hash) => next.add(hash));
             return next;
           });
         }
         if (autoApprovalErrors.length > 0) {
           setActionError(autoApprovalErrors[0]);
+        }
+        const uploadedFileName = file.name.trim();
+        if (uploadedFileName) {
+          await fetch("/api/reconciliation/uploaded-files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              accountName: selectedAccount,
+              fileName: uploadedFileName,
+            }),
+          });
+          setUploadedFilesByAccount((prev) => {
+            const existing = prev[selectedAccount] ?? [];
+            if (existing.includes(uploadedFileName)) return prev;
+            return {
+              ...prev,
+              [selectedAccount]: [...existing, uploadedFileName],
+            };
+          });
         }
         setActiveTab(selectedAccount);
       } catch (err) {
@@ -1224,6 +1330,7 @@ export default function ReconcilePage() {
   const activeCompletedRows = (statementCompletedRowsByAccount[activeTab] ?? []).filter(
     (row) => row.bankTransaction.accountName === activeTab,
   );
+  const selectedAccountUploadedFiles = uploadedFilesByAccount[selectedAccount] ?? [];
 
   return (
     <DashboardLayout>
@@ -1265,33 +1372,57 @@ export default function ReconcilePage() {
         </div>
 
         {viewMode === "accountDetail" && (
-          <div
-            {...getRootProps()}
-            className={`rounded-xl border border-dashed p-6 text-center cursor-pointer transition-colors ${
-              isDragActive
-                ? "border-accent bg-accent/10"
-                : "border-charcoal-dark bg-[#252525] hover:border-accent/70 hover:bg-[#2a2a2a]"
-            }`}
-          >
-            <input {...getInputProps()} />
-            <Upload className="mx-auto mb-2 text-gray-400" />
-            <p className="text-gray-200 text-sm">
-              {isDragActive ? "Drop the CSV here..." : "Drop a CSV here, or click to upload"}
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              Account profile: <span className="text-gray-300">{selectedAccount}</span>
-            </p>
-            {!accountHasConfiguredParser(selectedAccount) && (
-              <p className="text-xs text-yellow-300/90 mt-1">
-                CSV parser not configured yet for this account. Upload may return no transactions.
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div
+              {...getRootProps()}
+              className={`rounded-xl border border-dashed p-6 text-center cursor-pointer transition-colors ${
+                isDragActive
+                  ? "border-accent bg-accent/10"
+                  : "border-charcoal-dark bg-[#252525] hover:border-accent/70 hover:bg-[#2a2a2a]"
+              }`}
+            >
+              <input {...getInputProps()} />
+              <Upload className="mx-auto mb-2 text-gray-400" />
+              <p className="text-gray-200 text-sm">
+                {isDragActive ? "Drop the CSV here..." : "Drop a CSV here, or click to upload"}
               </p>
-            )}
-            {isUploading && (
-              <div className="mt-2 inline-flex items-center gap-2 text-sm text-gray-300">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Processing...
+              <p className="text-xs text-gray-500 mt-1">
+                Account profile: <span className="text-gray-300">{selectedAccount}</span>
+              </p>
+              {!accountHasConfiguredParser(selectedAccount) && (
+                <p className="text-xs text-yellow-300/90 mt-1">
+                  CSV parser not configured yet for this account. Upload may return no transactions.
+                </p>
+              )}
+              {isUploading && (
+                <div className="mt-2 inline-flex items-center gap-2 text-sm text-gray-300">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Processing...
+                </div>
+              )}
+            </div>
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark">
+                <h2 className="text-white font-semibold">Files</h2>
               </div>
-            )}
+              <div className="p-3 text-sm">
+                {selectedAccountUploadedFiles.length === 0 ? (
+                  <p className="text-gray-400">No files uploaded for this account yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {selectedAccountUploadedFiles.map((fileName) => (
+                      <div
+                        key={fileName}
+                        className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2 text-gray-200 truncate"
+                        title={fileName}
+                      >
+                        {fileName}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         )}
 
