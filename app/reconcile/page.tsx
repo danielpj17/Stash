@@ -172,6 +172,41 @@ function accountHasConfiguredParser(account: string): boolean {
   return CSV_PARSER_READY_ACCOUNTS.has(account as AccountOption);
 }
 
+function normalizeDateOnly(raw?: string): string {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+  if (!trimmed) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const y = parsed.getUTCFullYear();
+  const m = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(parsed.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function normalizeText(raw?: string): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildExpenseSignature(amount: number, dateRaw?: string, description?: string): string {
+  return `${toCents(Math.abs(Number(amount) || 0))}|${normalizeDateOnly(dateRaw)}|${normalizeText(description)}`;
+}
+
+function buildTransferSignature(
+  amount: number,
+  dateRaw?: string,
+  transferFrom?: string,
+  transferTo?: string,
+): string {
+  return `${toCents(Math.abs(Number(amount) || 0))}|${normalizeDateOnly(dateRaw)}|${normalizeText(
+    transferFrom,
+  )}|${normalizeText(transferTo)}`;
+}
+
 function toCents(value: number): number {
   return Math.round(value * 100);
 }
@@ -399,12 +434,50 @@ export default function ReconcilePage() {
     [activeTab, statementCompletedRowsByAccount, statementReviewRowsByAccount],
   );
 
+  const autoCompletedExpenseSignatures = useMemo(() => {
+    const signatures = new Set<string>();
+    for (const match of allMatches) {
+      const id = idForTx(match.bankTransaction);
+      const isCompleted = match.matchType === "exact_match" || approvedIds.has(id);
+      if (!isCompleted || !match.matchedSheetExpense) continue;
+      signatures.add(
+        buildExpenseSignature(
+          Number(match.matchedSheetExpense.amount ?? 0),
+          match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+          match.matchedSheetExpense.description,
+        ),
+      );
+    }
+    return signatures;
+  }, [allMatches, approvedIds]);
+
+  const autoCompletedTransferSignatures = useMemo(() => {
+    const signatures = new Set<string>();
+    for (const match of allMatches) {
+      const id = idForTx(match.bankTransaction);
+      const isCompleted = match.matchType === "exact_match" || approvedIds.has(id);
+      if (!isCompleted || !match.matchedSheetTransfer) continue;
+      signatures.add(
+        buildTransferSignature(
+          Number(match.matchedSheetTransfer.amount ?? 0),
+          match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
+          match.matchedSheetTransfer.transferFrom,
+          match.matchedSheetTransfer.transferTo,
+        ),
+      );
+    }
+    return signatures;
+  }, [allMatches, approvedIds]);
+
   const userInputtedEntries = useMemo(() => {
     const expenseEntries: UserInputtedEntry[] = sheetExpenses.map((row, index) => {
       const rowId = (row.rowId ?? "").trim();
       const key = rowId ? claimKey("Expenses", rowId) : `Expenses:missing:${index}`;
       const claimed = rowId ? claimedRowKeys.has(claimKey("Expenses", rowId)) : false;
       const dateValue = row.timestamp ?? "";
+      const autoCompleted = autoCompletedExpenseSignatures.has(
+        buildExpenseSignature(Number(row.amount ?? 0), dateValue, row.description),
+      );
       return {
         id: key,
         source: "Expenses",
@@ -412,7 +485,7 @@ export default function ReconcilePage() {
         title: row.description || row.expenseType || "Expense row",
         subtitle: `${row.account ?? "No account"} • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: claimed,
+        isCompleted: claimed || autoCompleted,
       };
     });
 
@@ -421,6 +494,14 @@ export default function ReconcilePage() {
       const status = rowId ? transferClaimStatusByRowId[rowId] : undefined;
       const dateValue = row.timestamp ?? "";
       const title = `${row.transferFrom || "—"} → ${row.transferTo || "—"}`;
+      const autoCompleted = autoCompletedTransferSignatures.has(
+        buildTransferSignature(
+          Number(row.amount ?? 0),
+          dateValue,
+          row.transferFrom,
+          row.transferTo,
+        ),
+      );
       return {
         id: rowId ? `Transfers:${rowId}` : `Transfers:missing:${index}`,
         source: "Transfers",
@@ -428,12 +509,19 @@ export default function ReconcilePage() {
         title,
         subtitle: `Transfer • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: Boolean(status?.isComplete),
+        isCompleted: Boolean(status?.isComplete) || autoCompleted,
       };
     });
 
     return sortByNewestDate([...expenseEntries, ...transferEntries], (entry) => entry.dateValue);
-  }, [claimedRowKeys, sheetExpenses, sheetTransfers, transferClaimStatusByRowId]);
+  }, [
+    autoCompletedExpenseSignatures,
+    autoCompletedTransferSignatures,
+    claimedRowKeys,
+    sheetExpenses,
+    sheetTransfers,
+    transferClaimStatusByRowId,
+  ]);
 
   const userInputtedReviewRows = useMemo(
     () => userInputtedEntries.filter((entry) => !entry.isCompleted),
