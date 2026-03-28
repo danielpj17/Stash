@@ -52,7 +52,7 @@ type QuickAddState = {
 
 type SplitDraftLine = {
   key: string;
-  sheetName: "Expenses";
+  sheetName: "Expenses" | "Transfers";
   rowId: string;
   amount: number;
   expenseType: string;
@@ -778,8 +778,9 @@ export default function ReconcilePage() {
     const tx = match.bankTransaction;
     setActionError("");
     try {
-      const [freshSheetRows, claimsRes] = await Promise.all([
+      const [freshSheetRows, freshTransfers, claimsRes] = await Promise.all([
         getExpenses(),
+        getTransfers(),
         fetch("/api/reconciliation/claims", { cache: "no-store" }),
       ]);
       if (!claimsRes.ok) {
@@ -790,9 +791,10 @@ export default function ReconcilePage() {
       const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
 
       setSheetExpenses(freshSheetRows);
+      setSheetTransfers(freshTransfers);
       setClaimedRowKeys(claimedRows);
 
-      const availableCandidates = freshSheetRows
+      const expenseCandidates: SplitDraftLine[] = freshSheetRows
         .filter((row) => {
           const rowId = (row.rowId ?? "").trim();
           if (!rowId) return false;
@@ -811,6 +813,33 @@ export default function ReconcilePage() {
             account: row.account,
           };
         });
+
+      const transferCandidates: SplitDraftLine[] = freshTransfers
+        .filter((row) => {
+          const rowId = (row.transferRowId ?? "").trim();
+          if (!rowId) return false;
+          return !claimedRows.has(claimKey("Transfers", rowId));
+        })
+        .map((row) => {
+          const rowId = (row.transferRowId ?? "").trim();
+          const from = row.transferFrom?.trim() || "—";
+          const to = row.transferTo?.trim() || row.description?.trim() || "—";
+          return {
+            key: claimKey("Transfers", rowId),
+            sheetName: "Transfers" as const,
+            rowId,
+            amount: Math.abs(Number(row.amount)),
+            expenseType: "Transfer",
+            description: `${from} → ${to}`,
+            timestamp: row.timestamp,
+            account: undefined,
+          };
+        });
+
+      const availableCandidates = sortByNewestDate(
+        [...expenseCandidates, ...transferCandidates],
+        (r) => r.timestamp,
+      );
 
       setSplitModal({
         open: true,
@@ -1264,6 +1293,7 @@ export default function ReconcilePage() {
     if (!q) return sortedSplitCandidates;
     return sortedSplitCandidates.filter((row) =>
       [
+        row.sheetName,
         row.expenseType,
         row.description,
         row.account,
@@ -2549,7 +2579,7 @@ export default function ReconcilePage() {
                   type="text"
                   value={splitSearchQuery}
                   onChange={(e) => setSplitSearchQuery(e.target.value)}
-                  placeholder="Search by type, description, account, row ID, or date"
+                  placeholder="Search expenses or transfers (type, description, row ID, date)"
                   className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
                 />
               </div>
@@ -2559,7 +2589,7 @@ export default function ReconcilePage() {
                   <p className="px-3 py-2 text-sm text-gray-400">
                     {splitSearchQuery.trim()
                       ? "No rows match your search."
-                      : "No unclaimed expense rows with a Row ID are available."}
+                      : "No unclaimed sheet rows are available. Expense rows need a Row ID; transfer rows need a Transfer Row ID."}
                   </p>
                 ) : (
                   <div className="divide-y divide-charcoal-dark">
@@ -2578,6 +2608,9 @@ export default function ReconcilePage() {
                             className="mt-1"
                           />
                           <div className="min-w-0">
+                            <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-0.5">
+                              {row.sheetName}
+                            </p>
                             <p className="text-sm text-gray-200 truncate">
                               {row.expenseType || "—"} • {row.description || "—"}
                             </p>
@@ -2587,7 +2620,7 @@ export default function ReconcilePage() {
                               {row.account ? ` • ${row.account}` : ""}
                             </p>
                             <p className="text-[11px] text-gray-500 mt-0.5">
-                              Row ID: {row.rowId}
+                              {row.sheetName === "Transfers" ? "Transfer Row ID" : "Row ID"}: {row.rowId}
                             </p>
                           </div>
                         </label>
