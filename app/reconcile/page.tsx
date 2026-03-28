@@ -21,6 +21,7 @@ import {
   getAccountAnchors,
   mapAccountNameToBalanceKey,
 } from "@/services/accountBalancesService";
+import { RECONCILIATION_RESET_CONFIRM } from "@/lib/reconciliationReset";
 
 type AccountOption =
   | "WF Checking"
@@ -107,6 +108,13 @@ type DismissModalState = {
   open: boolean;
   match: MatchResult | null;
   note: string;
+  submitting: boolean;
+  error: string;
+};
+
+type ResetReconcileModalState = {
+  open: boolean;
+  confirmText: string;
   submitting: boolean;
   error: string;
 };
@@ -344,6 +352,12 @@ export default function ReconcilePage() {
     open: false,
     match: null,
     note: "",
+    submitting: false,
+    error: "",
+  });
+  const [resetReconcileModal, setResetReconcileModal] = useState<ResetReconcileModalState>({
+    open: false,
+    confirmText: "",
     submitting: false,
     error: "",
   });
@@ -1012,6 +1026,55 @@ export default function ReconcilePage() {
     }
   }, [dismissModal.match, dismissModal.note]);
 
+  const openResetReconcileModal = useCallback(() => {
+    setResetReconcileModal({ open: true, confirmText: "", submitting: false, error: "" });
+  }, []);
+
+  const closeResetReconcileModal = useCallback(() => {
+    setResetReconcileModal({ open: false, confirmText: "", submitting: false, error: "" });
+  }, []);
+
+  const handleFullReconcileReset = useCallback(async () => {
+    if (resetReconcileModal.confirmText.trim() !== RECONCILIATION_RESET_CONFIRM) {
+      setResetReconcileModal((prev) => ({
+        ...prev,
+        error: `Type ${RECONCILIATION_RESET_CONFIRM} exactly to confirm.`,
+      }));
+      return;
+    }
+    setResetReconcileModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: RECONCILIATION_RESET_CONFIRM }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Reset failed (${res.status})`);
+      }
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
+      }
+      setMatchesByAccount({});
+      setProcessedHashes(new Set());
+      setDismissalNotesById({});
+      setDisconnectedIds(new Set());
+      setClaimedRowKeys(new Set());
+      setTransferClaimStatusByRowId({});
+      setUploadedFilesByAccount({});
+      setActionError("");
+      setUploadError("");
+      setResetReconcileModal({ open: false, confirmText: "", submitting: false, error: "" });
+    } catch (err) {
+      setResetReconcileModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Reset failed.",
+      }));
+    }
+  }, [resetReconcileModal.confirmText]);
+
   const handleDisconnect = useCallback(
     async (match: MatchResult) => {
       const tx = match.bankTransaction;
@@ -1578,6 +1641,13 @@ export default function ReconcilePage() {
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <h1 className="text-2xl font-semibold text-white">Reconcile</h1>
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            <button
+              type="button"
+              onClick={openResetReconcileModal}
+              className="px-3 py-1.5 rounded-lg border border-red-500/40 text-red-300 text-sm hover:text-red-200 hover:bg-red-500/10 transition-colors"
+            >
+              Clear reconciliation data
+            </button>
             <button
               type="button"
               onClick={openAnchorModal}
@@ -2323,6 +2393,81 @@ export default function ReconcilePage() {
               >
                 {dismissModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Save dismissal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {resetReconcileModal.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeResetReconcileModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-reconcile-title"
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-[#252525] border border-red-500/30 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <h2 id="reset-reconcile-title" className="text-white font-semibold">
+                Clear all reconciliation data
+              </h2>
+              <button
+                type="button"
+                onClick={closeResetReconcileModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 text-sm text-gray-300">
+              <p>
+                This removes <span className="text-gray-200">statement match data</span> from this
+                browser, and deletes in Neon: processed hashes, claim links, transfer claims,
+                dismissal notes, and uploaded-file history. Your Google Sheet expenses are not
+                changed. Statement ending balances (anchors) are kept.
+              </p>
+              <p className="text-xs text-gray-500">
+                Type{" "}
+                <code className="text-amber-200/90">{RECONCILIATION_RESET_CONFIRM}</code> to confirm.
+              </p>
+              <input
+                type="text"
+                value={resetReconcileModal.confirmText}
+                onChange={(e) =>
+                  setResetReconcileModal((prev) => ({
+                    ...prev,
+                    confirmText: e.target.value,
+                    error: "",
+                  }))
+                }
+                autoComplete="off"
+                className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-red-500/50 focus:ring-1 focus:ring-red-500/30 outline-none font-mono"
+                placeholder={RECONCILIATION_RESET_CONFIRM}
+              />
+              {resetReconcileModal.error && (
+                <p className="text-xs text-red-400">{resetReconcileModal.error}</p>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeResetReconcileModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleFullReconcileReset()}
+                disabled={resetReconcileModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {resetReconcileModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Clear everything
               </button>
             </div>
           </div>
