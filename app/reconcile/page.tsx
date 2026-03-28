@@ -190,6 +190,21 @@ function mergeWellsFargoBucketIntoChecking(
   return next;
 }
 
+/** Multiple CSV uploads for the same account (e.g. Jan + Feb); dedupe by hash, newest upload wins. */
+function mergeStatementMatchesForAccount(
+  existing: MatchResult[] | undefined,
+  incoming: MatchResult[],
+): MatchResult[] {
+  const byHash = new Map<string, MatchResult>();
+  for (const m of existing ?? []) {
+    byHash.set(m.bankTransaction.hash, m);
+  }
+  for (const m of incoming) {
+    byHash.set(m.bankTransaction.hash, m);
+  }
+  return Array.from(byHash.values());
+}
+
 function fmtMoney(amount: number): string {
   return amount.toLocaleString("en-US", {
     style: "currency",
@@ -1573,7 +1588,7 @@ export default function ReconcilePage() {
 
         setMatchesByAccount((prev) => ({
           ...prev,
-          [selectedAccount]: data.matches,
+          [selectedAccount]: mergeStatementMatchesForAccount(prev[selectedAccount], data.matches),
         }));
         if (autoApprovedHashes.length > 0) {
           setProcessedHashes((prev) => {
