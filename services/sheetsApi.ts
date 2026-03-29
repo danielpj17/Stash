@@ -11,6 +11,8 @@ const SHEETS_API = "/api/sheets";
 
 export type SheetRow = {
   timestamp?: string;
+  /** Present when the sheet/API sends a separate date column. */
+  date?: string;
   expenseType: string;
   amount: number;
   description: string;
@@ -39,8 +41,11 @@ function normalizeRow(raw: Record<string, unknown>): SheetRow {
   const account = String(getRawValue(raw, ["Account", "account"]) ?? "");
   const rowIdRaw = getRawValue(raw, ["Row ID", "row id", "rowId", "row_id", "Row Id"]);
   const rowId = typeof rowIdRaw === "string" ? rowIdRaw.trim() : "";
+  const dateRaw = getRawValue(raw, ["Date", "date"]);
+  const dateStr = typeof dateRaw === "string" ? dateRaw.trim() : "";
   return {
     timestamp: (getRawValue(raw, ["Timestamp", "timestamp"]) as string | undefined),
+    date: dateStr || undefined,
     expenseType: String(getRawValue(raw, ["Expense Type", "expenseType", "expense type"]) ?? ""),
     amount: Number(getRawValue(raw, ["Amount", "amount"]) ?? 0),
     description: String(getRawValue(raw, ["Description", "description"]) ?? ""),
@@ -145,6 +150,7 @@ export async function submitExpense(payload: {
 
 export type TransferRow = {
   timestamp?: string;
+  date?: string;
   transferFrom: string;
   transferTo: string;
   amount: number;
@@ -164,8 +170,11 @@ function normalizeTransferRow(raw: Record<string, unknown>): TransferRow {
     "Transfer Row Id",
   ]);
   const transferRowId = typeof transferRowIdRaw === "string" ? transferRowIdRaw.trim() : "";
+  const dateRaw = getRawValue(raw, ["Date", "date"]);
+  const dateStr = typeof dateRaw === "string" ? dateRaw.trim() : "";
   return {
     timestamp: (getRawValue(raw, ["Timestamp", "timestamp"]) as string | undefined),
+    date: dateStr || undefined,
     transferFrom: String(
       getRawValue(raw, ["Transfer from", "Transfer From", "transferFrom", "transfer from"]) ?? ""
     ),

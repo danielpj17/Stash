@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback, useEffect } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
@@ -190,19 +190,22 @@ function mergeWellsFargoBucketIntoChecking(
   return next;
 }
 
-/** Multiple CSV uploads for the same account (e.g. Jan + Feb); dedupe by hash, newest upload wins. */
-function mergeStatementMatchesForAccount(
-  existing: MatchResult[] | undefined,
-  incoming: MatchResult[],
-): MatchResult[] {
-  const byHash = new Map<string, MatchResult>();
-  for (const m of existing ?? []) {
-    byHash.set(m.bankTransaction.hash, m);
+function csvRowDedupeKey(row: string[]): string {
+  return row.map((c) => String(c).trim()).join("\t");
+}
+
+/** Merge multiple CSV uploads per account; same row shape deduped, newest upload wins per key. */
+function mergeCsvRowArrays(existing: string[][] | undefined, incoming: string[][]): string[][] {
+  const byKey = new Map<string, string[]>();
+  for (const row of existing ?? []) {
+    const key = csvRowDedupeKey(row);
+    if (key) byKey.set(key, row);
   }
-  for (const m of incoming) {
-    byHash.set(m.bankTransaction.hash, m);
+  for (const row of incoming) {
+    const key = csvRowDedupeKey(row);
+    if (key) byKey.set(key, row);
   }
-  return Array.from(byHash.values());
+  return Array.from(byKey.values());
 }
 
 function fmtMoney(amount: number): string {
@@ -282,6 +285,25 @@ function buildTransferSignature(
   )}|${normalizeText(transferTo)}`;
 }
 
+/** Same date field order as `findMatches` / matched sheet payloads: timestamp, then date. */
+function sheetExpenseDateRaw(row: Pick<SheetRow, "timestamp" | "date">): string {
+  return String(row.timestamp ?? row.date ?? "").trim();
+}
+
+function buildSheetExpenseSignatureFromRow(row: {
+  amount?: number;
+  timestamp?: string;
+  date?: string;
+  description?: string;
+}): string {
+  const dr = sheetExpenseDateRaw(row);
+  return buildExpenseSignature(Number(row.amount ?? 0), dr || undefined, row.description);
+}
+
+function sheetTransferDateRaw(row: Pick<TransferRow, "timestamp" | "date">): string {
+  return String(row.timestamp ?? row.date ?? "").trim();
+}
+
 function toCents(value: number): number {
   return Math.round(value * 100);
 }
@@ -330,6 +352,8 @@ export default function ReconcilePage() {
   const [claimedRowKeys, setClaimedRowKeys] = useState<Set<string>>(new Set());
   const [transferClaimStatusByRowId, setTransferClaimStatusByRowId] =
     useState<TransferClaimStatusByRowId>({});
+  /** Merged raw CSV rows per account — used to re-run /match for every account after a transfer leg claim. */
+  const statementCsvRowsByAccountRef = useRef<Record<string, string[][]>>({});
   const [quickAdd, setQuickAdd] = useState<QuickAddState>({
     open: false,
     rowId: null,
@@ -662,26 +686,37 @@ export default function ReconcilePage() {
   const autoCompletedExpenseSignatures = useMemo(() => {
     const signatures = new Set<string>();
     for (const match of allMatches) {
-      const id = idForTx(match.bankTransaction);
-      const isCompleted = match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
+      const isCompleted =
+        match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
       if (!isCompleted || !match.matchedSheetExpense) continue;
-      signatures.add(
-        buildExpenseSignature(
-          Number(match.matchedSheetExpense.amount ?? 0),
-          match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
-          match.matchedSheetExpense.description,
-        ),
-      );
+      signatures.add(buildSheetExpenseSignatureFromRow(match.matchedSheetExpense));
     }
     return signatures;
   }, [allMatches, processedHashes]);
 
+  const expenseRowIdsLinkedByExactMatch = useMemo(() => {
+    const ids = new Set<string>();
+    for (const match of allMatches) {
+      if (match.matchType !== "exact_match" || !match.matchedSheetExpense) continue;
+      const id = String(match.matchedSheetExpense.rowId ?? "").trim();
+      if (id) ids.add(id);
+    }
+    return ids;
+  }, [allMatches]);
+
   const autoCompletedTransferSignatures = useMemo(() => {
     const signatures = new Set<string>();
     for (const match of allMatches) {
-      const id = idForTx(match.bankTransaction);
-      const isCompleted = match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
-      if (!isCompleted || !match.matchedSheetTransfer) continue;
+      if (!match.matchedSheetTransfer) continue;
+      const rowId = String(match.matchedSheetTransfer.transferRowId ?? "").trim();
+      if (rowId) {
+        const status = transferClaimStatusByRowId[rowId];
+        if (!status?.isComplete) continue;
+      } else {
+        const isCompleted =
+          match.matchType === "exact_match" || processedHashes.has(match.bankTransaction.hash);
+        if (!isCompleted) continue;
+      }
       signatures.add(
         buildTransferSignature(
           Number(match.matchedSheetTransfer.amount ?? 0),
@@ -692,17 +727,16 @@ export default function ReconcilePage() {
       );
     }
     return signatures;
-  }, [allMatches, processedHashes]);
+  }, [allMatches, processedHashes, transferClaimStatusByRowId]);
 
   const userInputtedEntries = useMemo(() => {
     const expenseEntries: UserInputtedEntry[] = sheetExpenses.map((row, index) => {
       const rowId = (row.rowId ?? "").trim();
       const key = rowId ? claimKey("Expenses", rowId) : `Expenses:missing:${index}`;
       const claimed = rowId ? claimedRowKeys.has(claimKey("Expenses", rowId)) : false;
-      const dateValue = row.timestamp ?? "";
-      const autoCompleted = autoCompletedExpenseSignatures.has(
-        buildExpenseSignature(Number(row.amount ?? 0), dateValue, row.description),
-      );
+      const dateValue = sheetExpenseDateRaw(row);
+      const tiedByExactMatch = Boolean(rowId && expenseRowIdsLinkedByExactMatch.has(rowId));
+      const autoCompleted = autoCompletedExpenseSignatures.has(buildSheetExpenseSignatureFromRow(row));
       return {
         id: key,
         source: "Expenses",
@@ -710,19 +744,19 @@ export default function ReconcilePage() {
         title: row.description || row.expenseType || "Expense row",
         subtitle: `${row.account ?? "No account"} • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: claimed || autoCompleted,
+        isCompleted: claimed || tiedByExactMatch || autoCompleted,
       };
     });
 
     const transferEntries: UserInputtedEntry[] = sheetTransfers.map((row, index) => {
       const rowId = (row.transferRowId ?? "").trim();
       const status = rowId ? transferClaimStatusByRowId[rowId] : undefined;
-      const dateValue = row.timestamp ?? "";
+      const dateValue = sheetTransferDateRaw(row);
       const title = `${row.transferFrom || "—"} → ${row.transferTo || "—"}`;
       const autoCompleted = autoCompletedTransferSignatures.has(
         buildTransferSignature(
           Number(row.amount ?? 0),
-          dateValue,
+          dateValue || undefined,
           row.transferFrom,
           row.transferTo,
         ),
@@ -743,6 +777,7 @@ export default function ReconcilePage() {
     autoCompletedExpenseSignatures,
     autoCompletedTransferSignatures,
     claimedRowKeys,
+    expenseRowIdsLinkedByExactMatch,
     sheetExpenses,
     sheetTransfers,
     transferClaimStatusByRowId,
@@ -985,6 +1020,114 @@ export default function ReconcilePage() {
     }
   }, []);
 
+  const rematchAllStoredAccounts = useCallback(async () => {
+    const accounts = Object.keys(statementCsvRowsByAccountRef.current);
+    if (accounts.length === 0) return;
+
+    const [sheetRows, sheetTransfers, processedHashesRes, dismissalsRes, claimsRes, transferClaimsRes] =
+      await Promise.all([
+        getExpenses(),
+        getTransfers(),
+        fetch("/api/reconciliation/processed", { cache: "no-store" }),
+        fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+        fetch("/api/reconciliation/claims", { cache: "no-store" }),
+        fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+      ]);
+
+    if (!processedHashesRes.ok) {
+      const err = await processedHashesRes.json().catch(() => ({ error: processedHashesRes.statusText }));
+      throw new Error(err.error || "Failed to load processed hashes.");
+    }
+    if (!dismissalsRes.ok) {
+      const err = await dismissalsRes.json().catch(() => ({ error: dismissalsRes.statusText }));
+      throw new Error(err.error || "Failed to load dismissals.");
+    }
+    if (!claimsRes.ok) {
+      const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
+      throw new Error(err.error || "Failed to load claimed sheet rows.");
+    }
+    if (!transferClaimsRes.ok) {
+      const err = await transferClaimsRes.json().catch(() => ({ error: transferClaimsRes.statusText }));
+      throw new Error(err.error || "Failed to load transfer claims.");
+    }
+
+    const processedHashesData = (await processedHashesRes.json()) as { hashes?: string[] };
+    let processedList = [...(processedHashesData.hashes ?? [])];
+    const dismissalsData = (await dismissalsRes.json()) as {
+      dismissals?: Array<{ hash: string; accountName: string; note: string }>;
+    };
+    const dismissalMap: Record<string, string> = {};
+    for (const d of dismissalsData.dismissals ?? []) {
+      dismissalMap[`${d.accountName}|${d.hash}`] = d.note;
+    }
+    setDismissalNotesById(dismissalMap);
+    const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+    const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
+    const transferClaimsData = (await transferClaimsRes.json()) as {
+      statusByRowId?: TransferClaimStatusByRowId;
+    };
+    setSheetExpenses(sheetRows);
+    setSheetTransfers(sheetTransfers);
+    setClaimedRowKeys(claimedRows);
+    setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+
+    const nextMatches: Record<string, MatchResult[]> = {};
+    const autoApprovalErrors: string[] = [];
+
+    for (const accountName of accounts) {
+      const rows = statementCsvRowsByAccountRef.current[accountName];
+      if (!rows?.length) continue;
+
+      const res = await fetch("/api/reconciliation/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountName,
+          rows,
+          sheetExpenses: sheetRows,
+          sheetTransfers,
+          processedHashes: processedList,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to match ${accountName} (${res.status})`);
+      }
+      const data = (await res.json()) as MatchResponse;
+      nextMatches[accountName] = data.matches;
+
+      const autoApprovable = data.matches.filter(
+        (match) => match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match),
+      );
+      const newAutoHashes: string[] = [];
+      await Promise.all(
+        autoApprovable.map(async (match) => {
+          try {
+            await persistProcessedHash(match.bankTransaction);
+            newAutoHashes.push(match.bankTransaction.hash);
+          } catch (err) {
+            autoApprovalErrors.push(
+              err instanceof Error
+                ? err.message
+                : `Failed to auto-approve ${match.bankTransaction.description || "transaction"}.`,
+            );
+          }
+        }),
+      );
+      if (newAutoHashes.length > 0) {
+        const merged = new Set(processedList);
+        newAutoHashes.forEach((h) => merged.add(h));
+        processedList = Array.from(merged);
+      }
+    }
+
+    setProcessedHashes(new Set(processedList.map((h) => String(h))));
+    setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking({ ...prev, ...nextMatches }));
+    if (autoApprovalErrors.length > 0) {
+      setActionError(autoApprovalErrors[0]);
+    }
+  }, [persistProcessedHash]);
+
   const handleApprove = useCallback(
     async (match: MatchResult) => {
       const tx = match.bankTransaction;
@@ -1101,6 +1244,7 @@ export default function ReconcilePage() {
         window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
       }
       setMatchesByAccount({});
+      statementCsvRowsByAccountRef.current = {};
       setProcessedHashes(new Set());
       setDismissalNotesById({});
       setDisconnectedIds(new Set());
@@ -1505,7 +1649,14 @@ export default function ReconcilePage() {
           },
         }));
       }
-      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
+      try {
+        await rematchAllStoredAccounts();
+      } catch (rematchErr) {
+        setActionError(
+          rematchErr instanceof Error ? rematchErr.message : "Rematch after transfer claim failed.",
+        );
+        setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
+      }
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(transferClaimModal.rowId as string);
@@ -1519,7 +1670,7 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to claim transfer.",
       }));
     }
-  }, [allMatches, closeTransferClaimModal, transferClaimModal]);
+  }, [allMatches, closeTransferClaimModal, rematchAllStoredAccounts, transferClaimModal]);
 
   const onDrop = useCallback(
     async (files: File[]) => {
@@ -1534,6 +1685,15 @@ export default function ReconcilePage() {
         if (parsedRows.length === 0) {
           throw new Error("CSV file has no data rows.");
         }
+
+        const mergedCsv = mergeCsvRowArrays(
+          statementCsvRowsByAccountRef.current[selectedAccount],
+          parsedRows,
+        );
+        statementCsvRowsByAccountRef.current = {
+          ...statementCsvRowsByAccountRef.current,
+          [selectedAccount]: mergedCsv,
+        };
 
         const [sheetRows, sheetTransfers, processedHashesRes, dismissalsRes, claimsRes, transferClaimsRes] =
           await Promise.all([
@@ -1585,7 +1745,7 @@ export default function ReconcilePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             accountName: selectedAccount,
-            rows: parsedRows,
+            rows: mergedCsv,
             sheetExpenses: sheetRows,
             sheetTransfers,
             processedHashes,
@@ -1616,10 +1776,12 @@ export default function ReconcilePage() {
           }),
         );
 
-        setMatchesByAccount((prev) => ({
-          ...prev,
-          [selectedAccount]: mergeStatementMatchesForAccount(prev[selectedAccount], data.matches),
-        }));
+        setMatchesByAccount((prev) =>
+          mergeWellsFargoBucketIntoChecking({
+            ...prev,
+            [selectedAccount]: data.matches,
+          }),
+        );
         if (autoApprovedHashes.length > 0) {
           setProcessedHashes((prev) => {
             const next = new Set(prev);
