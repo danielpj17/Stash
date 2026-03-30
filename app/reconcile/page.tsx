@@ -58,7 +58,10 @@ type SplitDraftLine = {
   expenseType: string;
   description: string;
   timestamp?: string;
+  date?: string;
   account?: string;
+  transferFrom?: string;
+  transferTo?: string;
 };
 
 type SplitModalState = {
@@ -66,6 +69,8 @@ type SplitModalState = {
   rowId: string | null;
   selectedKeys: string[];
   candidates: SplitDraftLine[];
+  /** Used when claiming a Transfers sheet row (1 vs 2 bank legs). */
+  transferExpectedLegs: 1 | 2;
   submitting: boolean;
   error: string;
 };
@@ -368,6 +373,7 @@ export default function ReconcilePage() {
     rowId: null,
     selectedKeys: [],
     candidates: [],
+    transferExpectedLegs: 2,
     submitting: false,
     error: "",
   });
@@ -751,6 +757,7 @@ export default function ReconcilePage() {
     const transferEntries: UserInputtedEntry[] = sheetTransfers.map((row, index) => {
       const rowId = (row.transferRowId ?? "").trim();
       const status = rowId ? transferClaimStatusByRowId[rowId] : undefined;
+      const claimed = rowId ? claimedRowKeys.has(claimKey("Transfers", rowId)) : false;
       const dateValue = sheetTransferDateRaw(row);
       const title = `${row.transferFrom || "—"} → ${row.transferTo || "—"}`;
       const autoCompleted = autoCompletedTransferSignatures.has(
@@ -768,7 +775,7 @@ export default function ReconcilePage() {
         title,
         subtitle: `Transfer • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: Boolean(status?.isComplete) || autoCompleted,
+        isCompleted: claimed || Boolean(status?.isComplete) || autoCompleted,
       };
     });
 
@@ -845,6 +852,7 @@ export default function ReconcilePage() {
             expenseType: row.expenseType,
             description: row.description,
             timestamp: row.timestamp,
+            date: row.date,
             account: row.account,
           };
         });
@@ -867,7 +875,10 @@ export default function ReconcilePage() {
             expenseType: "Transfer",
             description: `${from} → ${to}`,
             timestamp: row.timestamp,
+            date: row.date,
             account: undefined,
+            transferFrom: row.transferFrom,
+            transferTo: row.transferTo,
           };
         });
 
@@ -881,6 +892,7 @@ export default function ReconcilePage() {
         rowId: idForTx(tx),
         selectedKeys: [],
         candidates: availableCandidates,
+        transferExpectedLegs: 2,
         submitting: false,
         error: "",
       });
@@ -896,6 +908,7 @@ export default function ReconcilePage() {
       rowId: null,
       selectedKeys: [],
       candidates: [],
+      transferExpectedLegs: 2,
       submitting: false,
       error: "",
     });
@@ -1452,6 +1465,11 @@ export default function ReconcilePage() {
     [splitModal.candidates, splitModal.selectedKeys],
   );
 
+  const splitSelectionIncludesTransfer = useMemo(
+    () => selectedClaimRows.some((row) => row.sheetName === "Transfers"),
+    [selectedClaimRows],
+  );
+
   const splitEnteredAmount = useMemo(
     () => selectedClaimRows.reduce((sum, row) => sum + row.amount, 0),
     [selectedClaimRows],
@@ -1489,6 +1507,24 @@ export default function ReconcilePage() {
       return;
     }
 
+    const transferSelected = selectedRows.filter((row) => row.sheetName === "Transfers");
+    const expenseSelected = selectedRows.filter((row) => row.sheetName === "Expenses");
+    if (transferSelected.length > 0 && expenseSelected.length > 0) {
+      setSplitModal((prev) => ({
+        ...prev,
+        error:
+          "Claim transfer rows separately from expense rows (one claim for transfers only, another for expenses).",
+      }));
+      return;
+    }
+    if (transferSelected.length > 1) {
+      setSplitModal((prev) => ({
+        ...prev,
+        error: "Select only one transfer sheet row per claim.",
+      }));
+      return;
+    }
+
     const targetCents = toCents(Math.abs(selected.bankTransaction.amount));
     const enteredCents = selectedRows.reduce((sum, row) => sum + toCents(row.amount), 0);
     if (enteredCents !== targetCents) {
@@ -1523,6 +1559,38 @@ export default function ReconcilePage() {
         const err = await res.json().catch(() => ({ error: res.statusText }));
         throw new Error(err.error || `Failed to claim existing rows (${res.status})`);
       }
+
+      if (transferSelected.length === 1) {
+        const tr = transferSelected[0];
+        const tRes = await fetch("/api/reconciliation/transfer-claims", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transferRowId: tr.rowId,
+            expectedLegs: splitModal.transferExpectedLegs,
+            bankTransaction: {
+              hash: selected.bankTransaction.hash,
+              accountName: selected.bankTransaction.accountName,
+              amount: selected.bankTransaction.amount,
+            },
+          }),
+        });
+        if (!tRes.ok) {
+          const err = await tRes.json().catch(() => ({ error: tRes.statusText }));
+          throw new Error(
+            err.error ||
+              `Saved sheet link but transfer leg tracking failed (${tRes.status}). Try again or use disconnect.`,
+          );
+        }
+        const tClaimsGet = await fetch("/api/reconciliation/transfer-claims", { cache: "no-store" });
+        if (tClaimsGet.ok) {
+          const transferClaimsData = (await tClaimsGet.json()) as {
+            statusByRowId?: TransferClaimStatusByRowId;
+          };
+          setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+        }
+      }
+
       setClaimedRowKeys((prev) => {
         const next = new Set(prev);
         selectedRows.forEach((row) => next.add(row.key));
@@ -1555,11 +1623,37 @@ export default function ReconcilePage() {
             ? selectedRows[0].rowId
             : selectedRows.map((row) => row.rowId).join(", "),
       };
+
+      const singleTransfer = transferSelected.length === 1 ? transferSelected[0] : null;
+      const amountSignedForTransfer = singleTransfer
+        ? selected.bankTransaction.amount < 0
+          ? -Math.abs(singleTransfer.amount)
+          : Math.abs(singleTransfer.amount)
+        : 0;
+
       setMatchesByAccount((prev) => {
         const next: Record<string, MatchResult[]> = {};
         for (const [account, rows] of Object.entries(prev)) {
           next[account] = rows.map((row) => {
             if (idForTx(row.bankTransaction) !== splitModal.rowId) return row;
+            if (singleTransfer) {
+              return {
+                ...row,
+                matchType: "exact_match",
+                reason: "Claimed transfer sheet row and marked processed.",
+                matchedSheetTransfer: {
+                  amount: amountSignedForTransfer,
+                  transferRowId: singleTransfer.rowId,
+                  transferFrom: singleTransfer.transferFrom,
+                  transferTo: singleTransfer.transferTo,
+                  timestamp: singleTransfer.timestamp,
+                  date: singleTransfer.date,
+                },
+                matchedSheetTransferIndex: undefined,
+                matchedSheetExpense: undefined,
+                matchedSheetIndex: undefined,
+              };
+            }
             return {
               ...row,
               reason:
@@ -1588,7 +1682,7 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to claim selected rows.",
       }));
     }
-  }, [allMatches, closeSplitModal, splitModal]);
+  }, [allMatches, closeSplitModal, splitModal.rowId, splitModal.transferExpectedLegs, splitModal.selectedKeys, splitModal.candidates]);
 
   const handleTransferClaimSubmit = useCallback(async () => {
     if (!transferClaimModal.rowId) return;
@@ -2734,6 +2828,41 @@ export default function ReconcilePage() {
                   {fmtMoney(splitRemainingAmount)}
                 </span>
               </div>
+
+              {splitSelectionIncludesTransfer && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-2">
+                  <p className="text-xs text-amber-100/90">
+                    This claim links a <span className="font-medium">Transfers</span> sheet row. How many
+                    bank legs should this transfer need?
+                  </p>
+                  <div className="flex flex-wrap gap-4 text-sm text-gray-200">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="split-transfer-legs"
+                        checked={splitModal.transferExpectedLegs === 2}
+                        onChange={() =>
+                          setSplitModal((prev) => ({ ...prev, transferExpectedLegs: 2, error: "" }))
+                        }
+                        disabled={splitModal.submitting}
+                      />
+                      Two legs (typical between two accounts)
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="split-transfer-legs"
+                        checked={splitModal.transferExpectedLegs === 1}
+                        onChange={() =>
+                          setSplitModal((prev) => ({ ...prev, transferExpectedLegs: 1, error: "" }))
+                        }
+                        disabled={splitModal.submitting}
+                      />
+                      One leg only
+                    </label>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Search rows</label>
