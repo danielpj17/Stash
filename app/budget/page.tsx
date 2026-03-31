@@ -241,7 +241,8 @@ const chartMargin = { top: 6, right: 6, bottom: 6, left: 2 };
 const TRANSFER_FROM_OPTIONS = [
   "WF Checking",
   "WF Savings",
-  "Venmo",
+  "Venmo - Daniel",
+  "Venmo - Katie",
   "Fidelity",
   "Robinhood",
   "My529",
@@ -254,7 +255,8 @@ const TRANSFER_FROM_OPTIONS = [
 const TRANSFER_TO_OPTIONS = [
   "WF Checking",
   "WF Savings",
-  "Venmo",
+  "Venmo - Daniel",
+  "Venmo - Katie",
   "Fidelity",
   "Robinhood",
   "My529",

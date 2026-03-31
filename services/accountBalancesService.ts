@@ -5,7 +5,10 @@ import type { SupportedBroker } from "@/services/snaptradeApi";
 export const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   "WF Checking": "Wells Fargo Checking",
   "WF Savings": "Wells Fargo Savings",
-  Venmo: "Venmo",
+  "Venmo - Daniel": "Venmo - Daniel",
+  "Venmo - Katie": "Venmo - Katie",
+  /** Legacy sheet rows before split */
+  Venmo: "Venmo - Daniel",
   Fidelity: "Fidelity",
   Robinhood: "Robinhood",
   My529: "My529",
@@ -20,7 +23,8 @@ export const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
 export const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   "Wells Fargo Checking": 427.1,
   "Wells Fargo Savings": 1061.13,
-  Venmo: 56.47,
+  "Venmo - Daniel": 28.24,
+  "Venmo - Katie": 28.23,
   Fidelity: 10597.43,
   Robinhood: 711.39,
   My529: 0,
@@ -64,9 +68,9 @@ export function mapAccountNameToBalanceKey(raw: string): string {
   if (lower === "wf savings" || lower === "wells fargo savings") {
     return "Wells Fargo Savings";
   }
-  if (lower === "venmo" || lower === "venmo - daniel" || lower === "venmo - katie") {
-    return "Venmo";
-  }
+  if (lower === "venmo - daniel") return "Venmo - Daniel";
+  if (lower === "venmo - katie") return "Venmo - Katie";
+  if (lower === "venmo") return "Venmo - Daniel";
   return name;
 }
 
