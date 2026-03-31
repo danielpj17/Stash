@@ -127,6 +127,17 @@ type ResetReconcileModalState = {
   error: string;
 };
 
+type UserStatementClaimModalState = {
+  open: boolean;
+  entry: UserInputtedEntry | null;
+  selectedBankRowId: string | null;
+  searchQuery: string;
+  accountFilter: AccountOption | typeof ALL_ACCOUNTS_OPTION;
+  transferExpectedLegs: 1 | 2;
+  submitting: boolean;
+  error: string;
+};
+
 const ACCOUNT_OPTIONS: AccountOption[] = [
   "WF Checking",
   "WF Savings",
@@ -314,6 +325,78 @@ function toCents(value: number): number {
   return Math.round(value * 100);
 }
 
+function parseExpenseRowIdFromEntryId(id: string): string | null {
+  if (!id.startsWith("Expenses:")) return null;
+  const rest = id.slice("Expenses:".length);
+  if (rest.startsWith("missing:")) return null;
+  return rest || null;
+}
+
+function parseTransferRowIdFromEntryId(id: string): string | null {
+  if (!id.startsWith("Transfers:")) return null;
+  const rest = id.slice("Transfers:".length);
+  if (rest.startsWith("missing:")) return null;
+  return rest || null;
+}
+
+function dateDistanceInDaysSafe(a: string, b: string): number {
+  const na = normalizeDateOnly(a);
+  const nb = normalizeDateOnly(b);
+  if (!na || !nb) return 9999;
+  const da = Date.parse(na);
+  const db = Date.parse(nb);
+  if (!Number.isFinite(da) || !Number.isFinite(db)) return 9999;
+  return Math.abs(Math.round((db - da) / (86400 * 1000)));
+}
+
+function findBestStatementMatchForUserEntry(
+  entry: UserInputtedEntry,
+  reviewMatches: MatchResult[],
+): MatchResult | null {
+  const absAmt = Math.abs(entry.amount);
+  const centsUser = toCents(absAmt);
+
+  if (entry.source === "Expenses") {
+    const rowId = parseExpenseRowIdFromEntryId(entry.id);
+    if (rowId) {
+      const direct = reviewMatches.find(
+        (m) => String(m.matchedSheetExpense?.rowId ?? "").trim() === rowId,
+      );
+      if (direct) return direct;
+    }
+    const candidates = reviewMatches.filter(
+      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort(
+      (a, b) =>
+        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
+        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
+    )[0];
+  }
+
+  if (entry.source === "Transfers") {
+    const rowId = parseTransferRowIdFromEntryId(entry.id);
+    if (rowId) {
+      const direct = reviewMatches.find(
+        (m) => String(m.matchedSheetTransfer?.transferRowId ?? "").trim() === rowId,
+      );
+      if (direct) return direct;
+    }
+    const candidates = reviewMatches.filter(
+      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort(
+      (a, b) =>
+        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
+        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
+    )[0];
+  }
+
+  return null;
+}
+
 function parseCsvFile(file: File): Promise<string[][]> {
   return new Promise((resolve, reject) => {
     Papa.parse<string[]>(file, {
@@ -378,6 +461,16 @@ export default function ReconcilePage() {
   const [homeAccountFilter, setHomeAccountFilter] = useState<AccountOption | typeof ALL_ACCOUNTS_OPTION>(
     ALL_ACCOUNTS_OPTION,
   );
+  const [userStatementClaimModal, setUserStatementClaimModal] = useState<UserStatementClaimModalState>({
+    open: false,
+    entry: null,
+    selectedBankRowId: null,
+    searchQuery: "",
+    accountFilter: ALL_ACCOUNTS_OPTION,
+    transferExpectedLegs: 2,
+    submitting: false,
+    error: "",
+  });
   const [transferClaimModal, setTransferClaimModal] = useState<TransferClaimModalState>({
     open: false,
     rowId: null,
@@ -773,8 +866,68 @@ export default function ReconcilePage() {
     return sortByNewestDate(list, (match) => match.bankTransaction.date);
   }, [statementReviewRowsByAccount, tabAccounts]);
 
-  const homeFilteredRows = useMemo(() => {
-    let rows = allStatementReviewMatches;
+  const userInputtedReviewRows = useMemo(
+    () => userInputtedEntries.filter((e) => !e.isCompleted),
+    [userInputtedEntries],
+  );
+
+  const homeRowsWithSuggestedBank = useMemo(
+    () =>
+      userInputtedReviewRows.map((entry) => ({
+        entry,
+        suggestedBank: findBestStatementMatchForUserEntry(entry, allStatementReviewMatches),
+      })),
+    [allStatementReviewMatches, userInputtedReviewRows],
+  );
+
+  const homeFilteredIncompleteRows = useMemo(() => {
+    let rows = homeRowsWithSuggestedBank;
+    const q = normalizeText(homeSearchQuery);
+    if (q) {
+      rows = rows.filter(({ entry, suggestedBank }) => {
+        const tx = suggestedBank?.bankTransaction;
+        const hay = [
+          entry.title,
+          entry.subtitle,
+          entry.source,
+          entry.expenseAccount,
+          entry.transferFrom,
+          entry.transferTo,
+          tx?.description,
+          tx?.accountName,
+          tx?.date,
+        ]
+          .map((v) => normalizeText(v))
+          .join(" ");
+        return hay.includes(q);
+      });
+    }
+    if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
+      rows = rows.filter(({ entry, suggestedBank }) => {
+        if (suggestedBank?.bankTransaction.accountName === homeAccountFilter) return true;
+        if (entry.source === "Expenses" && entry.expenseAccount === homeAccountFilter) return true;
+        if (entry.source === "Transfers") {
+          return (
+            entry.transferFrom === homeAccountFilter || entry.transferTo === homeAccountFilter
+          );
+        }
+        return false;
+      });
+    }
+    return rows;
+  }, [homeAccountFilter, homeRowsWithSuggestedBank, homeSearchQuery]);
+
+  const allHomeMatchedMatches = useMemo(() => {
+    const list: MatchResult[] = [];
+    for (const account of tabAccounts) {
+      list.push(...(statementAutoMatchedRowsByAccount[account] ?? []));
+      list.push(...(statementCompletedRowsByAccount[account] ?? []));
+    }
+    return sortByNewestDate(list, (m) => m.bankTransaction.date);
+  }, [statementAutoMatchedRowsByAccount, statementCompletedRowsByAccount, tabAccounts]);
+
+  const homeFilteredMatchedRows = useMemo(() => {
+    let rows = allHomeMatchedMatches;
     const q = normalizeText(homeSearchQuery);
     if (q) {
       rows = rows.filter((match) => {
@@ -788,10 +941,8 @@ export default function ReconcilePage() {
           exp?.description,
           exp?.expenseType,
           exp?.account,
-          exp?.rowId,
           tr?.transferFrom,
           tr?.transferTo,
-          tr?.transferRowId,
         ]
           .map((v) => normalizeText(v))
           .join(" ");
@@ -799,10 +950,45 @@ export default function ReconcilePage() {
       });
     }
     if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
-      rows = rows.filter((match) => match.bankTransaction.accountName === homeAccountFilter);
+      rows = rows.filter((match) => {
+        if (match.bankTransaction.accountName === homeAccountFilter) return true;
+        if (match.matchedSheetExpense?.account === homeAccountFilter) return true;
+        if (match.matchedSheetTransfer) {
+          return (
+            match.matchedSheetTransfer.transferFrom === homeAccountFilter ||
+            match.matchedSheetTransfer.transferTo === homeAccountFilter
+          );
+        }
+        return false;
+      });
     }
     return rows;
-  }, [allStatementReviewMatches, homeAccountFilter, homeSearchQuery]);
+  }, [allHomeMatchedMatches, homeAccountFilter, homeSearchQuery]);
+
+  const userClaimFilteredStatementLines = useMemo(() => {
+    if (!userStatementClaimModal.open || !userStatementClaimModal.entry) return [];
+    const entry = userStatementClaimModal.entry;
+    const userCents = toCents(Math.abs(entry.amount));
+    let list = allStatementReviewMatches.filter(
+      (m) => toCents(Math.abs(m.bankTransaction.amount)) === userCents,
+    );
+    if (userStatementClaimModal.accountFilter !== ALL_ACCOUNTS_OPTION) {
+      list = list.filter(
+        (m) => m.bankTransaction.accountName === userStatementClaimModal.accountFilter,
+      );
+    }
+    const q = normalizeText(userStatementClaimModal.searchQuery);
+    if (q) {
+      list = list.filter((m) => {
+        const tx = m.bankTransaction;
+        return [tx.description, tx.accountName, tx.date, String(tx.amount)]
+          .map((v) => normalizeText(v))
+          .join(" ")
+          .includes(q);
+      });
+    }
+    return list;
+  }, [allStatementReviewMatches, userStatementClaimModal]);
 
   const openQuickAdd = useCallback((match: MatchResult) => {
     const tx = match.bankTransaction;
@@ -918,6 +1104,32 @@ export default function ReconcilePage() {
       error: "",
     });
     setSplitSearchQuery("");
+  }, []);
+
+  const openUserStatementClaimModal = useCallback((entry: UserInputtedEntry) => {
+    setUserStatementClaimModal({
+      open: true,
+      entry,
+      selectedBankRowId: null,
+      searchQuery: "",
+      accountFilter: ALL_ACCOUNTS_OPTION,
+      transferExpectedLegs: 2,
+      submitting: false,
+      error: "",
+    });
+  }, []);
+
+  const closeUserStatementClaimModal = useCallback(() => {
+    setUserStatementClaimModal({
+      open: false,
+      entry: null,
+      selectedBankRowId: null,
+      searchQuery: "",
+      accountFilter: ALL_ACCOUNTS_OPTION,
+      transferExpectedLegs: 2,
+      submitting: false,
+      error: "",
+    });
   }, []);
 
   const openTransferClaimModal = useCallback((match: MatchResult) => {
@@ -1037,6 +1249,197 @@ export default function ReconcilePage() {
       throw new Error(err.error || `Failed to save hash (${res.status})`);
     }
   }, []);
+
+  const handleUserStatementClaimSubmit = useCallback(async () => {
+    const { entry, selectedBankRowId, transferExpectedLegs } = userStatementClaimModal;
+    if (!entry || !selectedBankRowId) {
+      setUserStatementClaimModal((prev) => ({ ...prev, error: "Select a statement line." }));
+      return;
+    }
+    const selected = allMatches.find((m) => idForTx(m.bankTransaction) === selectedBankRowId);
+    if (!selected) {
+      setUserStatementClaimModal((prev) => ({
+        ...prev,
+        error: "Statement line no longer available.",
+      }));
+      return;
+    }
+
+    let sheetName: "Expenses" | "Transfers";
+    let rowId: string;
+    if (entry.source === "Expenses") {
+      const id = parseExpenseRowIdFromEntryId(entry.id);
+      if (!id) {
+        setUserStatementClaimModal((prev) => ({
+          ...prev,
+          error: "Expense row is missing a Row ID.",
+        }));
+        return;
+      }
+      sheetName = "Expenses";
+      rowId = id;
+    } else {
+      const id = parseTransferRowIdFromEntryId(entry.id);
+      if (!id) {
+        setUserStatementClaimModal((prev) => ({
+          ...prev,
+          error: "Transfer row is missing a Transfer Row ID.",
+        }));
+        return;
+      }
+      sheetName = "Transfers";
+      rowId = id;
+    }
+
+    const targetCents = toCents(Math.abs(selected.bankTransaction.amount));
+    const linkCents = toCents(Math.abs(entry.amount));
+    if (targetCents !== linkCents) {
+      setUserStatementClaimModal((prev) => ({
+        ...prev,
+        error: "Selected statement amount must match the user-inputted amount.",
+      }));
+      return;
+    }
+
+    setUserStatementClaimModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/claims", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bankTransaction: {
+            hash: selected.bankTransaction.hash,
+            accountName: selected.bankTransaction.accountName,
+            amount: selected.bankTransaction.amount,
+            date: selected.bankTransaction.date,
+            description: selected.bankTransaction.description,
+          },
+          links: [
+            {
+              sheetName,
+              sheetRowId: rowId,
+              amount: Math.abs(entry.amount),
+            },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to claim (${res.status})`);
+      }
+
+      if (sheetName === "Transfers") {
+        const tRes = await fetch("/api/reconciliation/transfer-claims", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transferRowId: rowId,
+            expectedLegs: transferExpectedLegs,
+            bankTransaction: {
+              hash: selected.bankTransaction.hash,
+              accountName: selected.bankTransaction.accountName,
+              amount: selected.bankTransaction.amount,
+            },
+          }),
+        });
+        if (!tRes.ok) {
+          const err = await tRes.json().catch(() => ({ error: tRes.statusText }));
+          throw new Error(
+            err.error ||
+              `Saved sheet link but transfer leg tracking failed (${tRes.status}). Try again.`,
+          );
+        }
+        const tClaimsGet = await fetch("/api/reconciliation/transfer-claims", { cache: "no-store" });
+        if (tClaimsGet.ok) {
+          const transferClaimsData = (await tClaimsGet.json()) as {
+            statusByRowId?: TransferClaimStatusByRowId;
+          };
+          setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+        }
+      }
+
+      await persistProcessedHash(selected.bankTransaction);
+      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
+      setClaimedRowKeys((prev) => {
+        const next = new Set(prev);
+        next.add(claimKey(sheetName, rowId));
+        return next;
+      });
+
+      const bankRowId = idForTx(selected.bankTransaction);
+      setMatchesByAccount((prev) => {
+        const next: Record<string, MatchResult[]> = {};
+        for (const [account, rows] of Object.entries(prev)) {
+          next[account] = rows.map((row) => {
+            if (idForTx(row.bankTransaction) !== bankRowId) return row;
+            if (sheetName === "Transfers") {
+              const tr = sheetTransfers.find((t) => (t.transferRowId ?? "").trim() === rowId);
+              if (!tr) return row;
+              const amountSignedForTransfer =
+                selected.bankTransaction.amount < 0
+                  ? -Math.abs(Number(tr.amount ?? 0))
+                  : Math.abs(Number(tr.amount ?? 0));
+              return {
+                ...row,
+                matchType: "exact_match",
+                reason: "Claimed transfer sheet row and marked processed.",
+                matchedSheetTransfer: {
+                  amount: amountSignedForTransfer,
+                  transferRowId: rowId,
+                  transferFrom: tr.transferFrom,
+                  transferTo: tr.transferTo,
+                  timestamp: tr.timestamp,
+                  date: tr.date,
+                },
+                matchedSheetTransferIndex: undefined,
+                matchedSheetExpense: undefined,
+                matchedSheetIndex: undefined,
+              };
+            }
+            const exp = sheetExpenses.find((e) => (e.rowId ?? "").trim() === rowId);
+            if (!exp) return row;
+            return {
+              ...row,
+              matchType: "exact_match",
+              reason: "Claimed existing sheet row and marked processed.",
+              matchedSheetExpense: {
+                amount: Math.abs(Number(exp.amount)),
+                timestamp: exp.timestamp ?? selected.bankTransaction.date,
+                description: exp.description ?? "",
+                expenseType: exp.expenseType ?? "—",
+                account: exp.account ?? selected.bankTransaction.accountName,
+                rowId: exp.rowId,
+                date: exp.date,
+              },
+              matchedSheetIndex: undefined,
+              matchedSheetTransfer: undefined,
+              matchedSheetTransferIndex: undefined,
+            };
+          });
+        }
+        return next;
+      });
+      setDisconnectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(bankRowId);
+        return next;
+      });
+      closeUserStatementClaimModal();
+    } catch (err) {
+      setUserStatementClaimModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Failed to claim statement line.",
+      }));
+    }
+  }, [
+    allMatches,
+    closeUserStatementClaimModal,
+    persistProcessedHash,
+    sheetExpenses,
+    sheetTransfers,
+    userStatementClaimModal,
+  ]);
 
   const rematchAllStoredAccounts = useCallback(async () => {
     const accounts = Object.keys(statementCsvRowsByAccountRef.current);
@@ -1941,11 +2344,12 @@ export default function ReconcilePage() {
 
         {viewMode === "home" ? (
           <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="space-y-4 min-w-0">
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex flex-col gap-3">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-white font-semibold">User-inputted: Unmatched / Questionable</h2>
-                  <span className="text-xs text-gray-300">{homeFilteredRows.length}</span>
+                  <span className="text-xs text-gray-300">{homeFilteredIncompleteRows.length}</span>
                 </div>
                 <div className="flex flex-col sm:flex-row flex-wrap gap-3 sm:items-end">
                   <div className="flex flex-1 min-w-[200px] items-center gap-2">
@@ -1958,7 +2362,7 @@ export default function ReconcilePage() {
                       type="search"
                       value={homeSearchQuery}
                       onChange={(e) => setHomeSearchQuery(e.target.value)}
-                      placeholder="Search user text, statement description, account…"
+                      placeholder="Search incomplete & matched lists (user text, bank description, account…)"
                       className="w-full px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
                     />
                   </div>
@@ -1986,23 +2390,25 @@ export default function ReconcilePage() {
                 </div>
               </div>
               <div className="p-3 text-sm">
-                {allStatementReviewMatches.length === 0 ? (
-                  <p className="text-gray-400">No rows requiring manual review across accounts.</p>
-                ) : homeFilteredRows.length === 0 ? (
+                {userInputtedReviewRows.length === 0 ? (
+                  <p className="text-gray-400">No unmatched or questionable user-inputted transactions.</p>
+                ) : homeFilteredIncompleteRows.length === 0 ? (
                   <p className="text-gray-400">No rows match your search or account filter.</p>
                 ) : (
                   <div className="space-y-2">
-                    {homeFilteredRows.map((match, index) => {
-                      const tx = match.bankTransaction;
-                      const id = idForTx(tx);
+                    {homeFilteredIncompleteRows.map(({ entry, suggestedBank }, index) => {
+                      const match = suggestedBank;
+                      const tx = match?.bankTransaction;
+                      const id = tx ? idForTx(tx) : `no-bank:${entry.id}`;
                       const isTransferCandidate = Boolean(
-                        (match.matchType === "transfer" ||
-                          match.matchType === "questionable_match_fuzzy") &&
+                        match &&
+                          (match.matchType === "transfer" ||
+                            match.matchType === "questionable_match_fuzzy") &&
                           Boolean(match.matchedSheetTransfer?.transferRowId),
                       );
                       return (
                         <div
-                          key={`${id}-${index}`}
+                          key={`${entry.id}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
                           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
@@ -2010,9 +2416,126 @@ export default function ReconcilePage() {
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 User-inputted
                               </p>
-                              {match.matchedSheetExpense ? (
+                              {entry.source === "Expenses" ? (
                                 <>
-                                  <p className="text-yellow-300 text-sm truncate">
+                                  <p className="text-yellow-300 text-sm truncate">{entry.title}</p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {entry.subtitle} • {fmtMoney(entry.amount)}
+                                  </p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">{entry.title}</p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {entry.subtitle} • {fmtMoney(entry.amount)}
+                                  </p>
+                                </>
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Bank Transaction
+                              </p>
+                              {tx ? (
+                                <>
+                                  <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                  </p>
+                                </>
+                              ) : (
+                                <p className="text-xs text-gray-500">
+                                  No suggested statement line yet. Use Claim to pick a statement transaction.
+                                </p>
+                              )}
+                            </div>
+                            <div className="shrink-0 flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => match && handleApprove(match)}
+                                disabled={!match || processingId === id}
+                                className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
+                                aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
+                                title={isTransferCandidate ? "Claim transfer leg" : "Approve and mark processed"}
+                              >
+                                {match && processingId === id ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Check className="w-4 h-4" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => match && openDismissModal(match)}
+                                disabled={!match}
+                                className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 disabled:opacity-60 transition-colors"
+                                aria-label="Dismiss with note"
+                                title="Dismiss with note"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => match && openQuickAdd(match)}
+                                disabled={!match || Boolean(match.matchedSheetTransfer)}
+                                className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 disabled:opacity-60 transition-colors"
+                                aria-label="Quick add"
+                                title="Quick add to sheet"
+                              >
+                                <PlusCircle className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openUserStatementClaimModal(entry)}
+                                className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 transition-colors"
+                                aria-label="Claim statement line"
+                                title="Pick a statement line to link"
+                              >
+                                Claim
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+                <h2 className="text-white font-semibold">User-inputted: Matched</h2>
+                <span className="text-xs text-gray-300">{homeFilteredMatchedRows.length}</span>
+              </div>
+              <div className="p-3 text-sm">
+                {allHomeMatchedMatches.length === 0 ? (
+                  <p className="text-gray-400">No matched user-inputted transactions yet.</p>
+                ) : homeFilteredMatchedRows.length === 0 ? (
+                  <p className="text-gray-400">No rows match your search or account filter.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {homeFilteredMatchedRows.map((match, index) => {
+                      const tx = match.bankTransaction;
+                      const rowId = idForTx(tx);
+                      const dismissalNote = dismissalNotesById[rowId];
+                      return (
+                        <div
+                          key={`${rowId}-${index}`}
+                          className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                        >
+                          <div className="grid gap-3 md:grid-cols-2 items-start">
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                User-inputted Entry
+                              </p>
+                              {dismissalNote ? (
+                                <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                                  Dismissed: {dismissalNote}
+                                </p>
+                              ) : match.matchedSheetExpense ? (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">
                                     {match.matchedSheetExpense.description || "—"}
                                   </p>
                                   <p className="text-xs text-gray-400 mt-0.5">
@@ -2028,80 +2551,30 @@ export default function ReconcilePage() {
                                 </>
                               ) : match.matchedSheetTransfer ? (
                                 <>
-                                  <p
-                                    className={`text-sm truncate ${
-                                      match.matchType === "transfer" ? "text-green-300" : "text-yellow-300"
-                                    }`}
-                                  >
+                                  <p className="text-green-300 text-sm truncate">
                                     {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
                                     {(match.matchedSheetTransfer.transferTo ?? "—")}
                                   </p>
                                   <p className="text-xs text-gray-400 mt-0.5">
                                     Transfer •{" "}
                                     {fmtDate(
-                                      match.matchedSheetTransfer.timestamp ??
-                                        match.matchedSheetTransfer.date,
+                                      match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
                                     )}{" "}
                                     • {fmtMoney(match.matchedSheetTransfer.amount)}
                                   </p>
                                 </>
                               ) : (
-                                <p className="text-xs text-gray-500">No candidate match</p>
+                                <p className="text-xs text-gray-500">Processed</p>
                               )}
                             </div>
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 Bank Transaction
                               </p>
-                              <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
+                              <p className="text-gray-200 truncate">{tx.description || "—"}</p>
                               <p className="text-xs text-gray-400 mt-0.5">
                                 {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                               </p>
-                            </div>
-                            <div className="shrink-0 flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => handleApprove(match)}
-                                disabled={processingId === id}
-                                className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
-                                aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
-                                title={isTransferCandidate ? "Claim transfer leg" : "Approve and mark processed"}
-                              >
-                                {processingId === id ? (
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <Check className="w-4 h-4" />
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openDismissModal(match)}
-                                className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
-                                aria-label="Dismiss with note"
-                                title="Dismiss with note"
-                              >
-                                <X className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openQuickAdd(match)}
-                                disabled={Boolean(match.matchedSheetTransfer)}
-                                className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 transition-colors"
-                                aria-label="Quick add"
-                                title="Quick add to sheet"
-                              >
-                                <PlusCircle className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openSplitModal(match)}
-                                disabled={Boolean(match.matchedSheetTransfer)}
-                                className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 transition-colors"
-                                aria-label="Claim existing rows"
-                                title="Claim existing unmatched sheet rows"
-                              >
-                                Claim
-                              </button>
                             </div>
                           </div>
                         </div>
@@ -2111,6 +2584,7 @@ export default function ReconcilePage() {
                 )}
               </div>
             </section>
+            </div>
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
@@ -2781,6 +3255,198 @@ export default function ReconcilePage() {
               >
                 {splitModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Claim Rows
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {userStatementClaimModal.open && userStatementClaimModal.entry && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeUserStatementClaimModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="user-statement-claim-title"
+        >
+          <div
+            className="w-full max-w-3xl rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between shrink-0">
+              <h2 id="user-statement-claim-title" className="text-white font-semibold">
+                Link to statement transaction
+              </h2>
+              <button
+                type="button"
+                onClick={closeUserStatementClaimModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto flex-1 min-h-0">
+              <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
+                <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">User-inputted</p>
+                <p className="text-gray-100 truncate">{userStatementClaimModal.entry.title}</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {userStatementClaimModal.entry.source} • {userStatementClaimModal.entry.subtitle} •{" "}
+                  {fmtMoney(userStatementClaimModal.entry.amount)}
+                </p>
+              </div>
+              <p className="text-xs text-gray-400">
+                Only statement lines that still need reconciliation and match this amount are listed.
+              </p>
+              {userStatementClaimModal.entry.source === "Transfers" && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-2">
+                  <p className="text-xs text-amber-100/90">
+                    How many bank legs should this transfer need?
+                  </p>
+                  <div className="flex flex-wrap gap-4 text-sm text-gray-200">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="user-claim-transfer-legs"
+                        checked={userStatementClaimModal.transferExpectedLegs === 2}
+                        onChange={() =>
+                          setUserStatementClaimModal((prev) => ({
+                            ...prev,
+                            transferExpectedLegs: 2,
+                            error: "",
+                          }))
+                        }
+                        disabled={userStatementClaimModal.submitting}
+                      />
+                      Two legs
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="user-claim-transfer-legs"
+                        checked={userStatementClaimModal.transferExpectedLegs === 1}
+                        onChange={() =>
+                          setUserStatementClaimModal((prev) => ({
+                            ...prev,
+                            transferExpectedLegs: 1,
+                            error: "",
+                          }))
+                        }
+                        disabled={userStatementClaimModal.submitting}
+                      />
+                      One leg only
+                    </label>
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+                <div className="flex-1 min-w-0">
+                  <label className="block text-xs text-gray-400 mb-1">Search statement lines</label>
+                  <input
+                    type="search"
+                    value={userStatementClaimModal.searchQuery}
+                    onChange={(e) =>
+                      setUserStatementClaimModal((prev) => ({
+                        ...prev,
+                        searchQuery: e.target.value,
+                        error: "",
+                      }))
+                    }
+                    placeholder="Description, date, account…"
+                    className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Filter className="w-4 h-4 text-gray-500" aria-hidden />
+                  <label htmlFor="user-claim-account-filter" className="text-xs text-gray-400 whitespace-nowrap">
+                    Account
+                  </label>
+                  <select
+                    id="user-claim-account-filter"
+                    value={userStatementClaimModal.accountFilter}
+                    onChange={(e) =>
+                      setUserStatementClaimModal((prev) => ({
+                        ...prev,
+                        accountFilter: e.target.value as AccountOption | typeof ALL_ACCOUNTS_OPTION,
+                        error: "",
+                      }))
+                    }
+                    className="px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none min-w-[10rem]"
+                  >
+                    <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
+                    {ACCOUNT_OPTIONS.map((account) => (
+                      <option key={account} value={account}>
+                        {account}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="max-h-[40vh] overflow-auto rounded-md border border-charcoal-dark bg-charcoal">
+                {userClaimFilteredStatementLines.length === 0 ? (
+                  <p className="px-3 py-2 text-sm text-gray-400">
+                    No matching statement lines. Upload CSVs or adjust search / account filter.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-charcoal-dark">
+                    {userClaimFilteredStatementLines.map((m, idx) => {
+                      const tid = idForTx(m.bankTransaction);
+                      const selected = userStatementClaimModal.selectedBankRowId === tid;
+                      return (
+                        <label
+                          key={`${tid}-${idx}`}
+                          className="flex items-start gap-3 px-3 py-2 cursor-pointer hover:bg-[#2d2d2d]"
+                        >
+                          <input
+                            type="radio"
+                            name="user-statement-pick"
+                            checked={selected}
+                            onChange={() =>
+                              setUserStatementClaimModal((prev) => ({
+                                ...prev,
+                                selectedBankRowId: tid,
+                                error: "",
+                              }))
+                            }
+                            disabled={userStatementClaimModal.submitting}
+                            className="mt-1"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-0.5">
+                              {m.bankTransaction.accountName}
+                            </p>
+                            <p className="text-sm text-gray-200 truncate">
+                              {m.bankTransaction.description || "—"}
+                            </p>
+                            <p className="text-xs text-gray-400 mt-0.5">
+                              {fmtDate(m.bankTransaction.date)} • {fmtMoney(m.bankTransaction.amount)}
+                            </p>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              {userStatementClaimModal.error && (
+                <p className="text-xs text-red-400">{userStatementClaimModal.error}</p>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={closeUserStatementClaimModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleUserStatementClaimSubmit()}
+                disabled={userStatementClaimModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent-dark transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {userStatementClaimModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Link statement
               </button>
             </div>
           </div>
