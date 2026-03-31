@@ -68,6 +68,18 @@ async function ensureProcessedTable(sql: any) {
   `;
 }
 
+async function ensureUserSheetDismissalsTable(sql: any) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS reconciliation_user_sheet_dismissals (
+      sheet_name TEXT NOT NULL,
+      sheet_row_id TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT now(),
+      PRIMARY KEY (sheet_name, sheet_row_id)
+    )
+  `;
+}
+
 export async function POST(request: NextRequest) {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
@@ -95,12 +107,14 @@ export async function POST(request: NextRequest) {
     await ensureDismissalsTable(sql);
     await ensureUploadedFilesTable(sql);
     await ensureProcessedTable(sql);
+    await ensureUserSheetDismissalsTable(sql);
 
     await sql`DELETE FROM reconciliation_claim_links`;
     await sql`DELETE FROM reconciliation_transfer_claim_links`;
     await sql`DELETE FROM reconciliation_statement_dismissals`;
     await sql`DELETE FROM reconciliation_uploaded_files`;
     await sql`DELETE FROM processed_transactions`;
+    await sql`DELETE FROM reconciliation_user_sheet_dismissals`;
 
     return NextResponse.json({ success: true });
   } catch (err) {

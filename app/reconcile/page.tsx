@@ -3,7 +3,7 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
-import { Check, Filter, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
+import { Ban, Check, Filter, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   getExpenses,
@@ -120,6 +120,14 @@ type DismissModalState = {
   error: string;
 };
 
+type UserDismissModalState = {
+  open: boolean;
+  entry: UserInputtedEntry | null;
+  note: string;
+  submitting: boolean;
+  error: string;
+};
+
 type ResetReconcileModalState = {
   open: boolean;
   confirmText: string;
@@ -161,6 +169,19 @@ const RECONCILE_STORAGE_KEY = "reconcile-page-state-v3";
 
 function claimKey(sheetName: string, rowId: string): string {
   return `${sheetName}:${rowId}`;
+}
+
+/** For dismiss/claim APIs: real sheet row only (not `Expenses:missing:0`). */
+function parseSheetDismissKeyFromEntryId(
+  entryId: string,
+): { sheetName: "Expenses" | "Transfers"; sheetRowId: string } | null {
+  const firstColon = entryId.indexOf(":");
+  if (firstColon === -1) return null;
+  const sheetPrefix = entryId.slice(0, firstColon);
+  if (sheetPrefix !== "Expenses" && sheetPrefix !== "Transfers") return null;
+  const rest = entryId.slice(firstColon + 1);
+  if (rest.startsWith("missing:")) return null;
+  return { sheetName: sheetPrefix, sheetRowId: rest };
 }
 
 function idForTx(tx: BankTransaction): string {
@@ -426,6 +447,10 @@ export default function ReconcilePage() {
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
   const [dismissalNotesById, setDismissalNotesById] = useState<Record<string, string>>({});
+  const [userDismissedRowKeys, setUserDismissedRowKeys] = useState<Set<string>>(new Set());
+  const [userDismissalNotesByEntryId, setUserDismissalNotesByEntryId] = useState<Record<string, string>>(
+    {},
+  );
   const [processedHashes, setProcessedHashes] = useState<Set<string>>(new Set());
   const [disconnectedIds, setDisconnectedIds] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState("");
@@ -493,6 +518,13 @@ export default function ReconcilePage() {
     submitting: false,
     error: "",
   });
+  const [userDismissModal, setUserDismissModal] = useState<UserDismissModalState>({
+    open: false,
+    entry: null,
+    note: "",
+    submitting: false,
+    error: "",
+  });
   const [resetReconcileModal, setResetReconcileModal] = useState<ResetReconcileModalState>({
     open: false,
     confirmText: "",
@@ -555,9 +587,10 @@ export default function ReconcilePage() {
 
     async function loadProcessedAndDismissals() {
       try {
-        const [processedRes, dismissalsRes] = await Promise.all([
+        const [processedRes, dismissalsRes, userDismissalsRes] = await Promise.all([
           fetch("/api/reconciliation/processed", { cache: "no-store" }),
           fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+          fetch("/api/reconciliation/user-dismissals", { cache: "no-store" }),
         ]);
         if (cancelled) return;
         if (processedRes.ok) {
@@ -573,6 +606,19 @@ export default function ReconcilePage() {
             map[`${d.accountName}|${d.hash}`] = d.note;
           }
           setDismissalNotesById(map);
+        }
+        if (userDismissalsRes.ok) {
+          const data = (await userDismissalsRes.json()) as {
+            dismissedKeys?: string[];
+            dismissals?: Array<{ sheetName: string; sheetRowId: string; note: string }>;
+          };
+          const keys = new Set<string>((data.dismissedKeys ?? []).map((k) => String(k)));
+          setUserDismissedRowKeys(keys);
+          const noteMap: Record<string, string> = {};
+          for (const d of data.dismissals ?? []) {
+            noteMap[claimKey(d.sheetName, d.sheetRowId)] = d.note;
+          }
+          setUserDismissalNotesByEntryId(noteMap);
         }
       } catch {
         // Keep in-memory defaults if fetch fails.
@@ -808,6 +854,7 @@ export default function ReconcilePage() {
       const dateValue = sheetExpenseDateRaw(row);
       const tiedByExactMatch = Boolean(rowId && expenseRowIdsLinkedByExactMatch.has(rowId));
       const autoCompleted = autoCompletedExpenseSignatures.has(buildSheetExpenseSignatureFromRow(row));
+      const userDismissed = userDismissedRowKeys.has(key);
       return {
         id: key,
         source: "Expenses",
@@ -815,7 +862,7 @@ export default function ReconcilePage() {
         title: row.description || row.expenseType || "Expense row",
         subtitle: `${row.account ?? "No account"} • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: claimed || tiedByExactMatch || autoCompleted,
+        isCompleted: claimed || tiedByExactMatch || autoCompleted || userDismissed,
         expenseAccount: row.account?.trim() || undefined,
       };
     });
@@ -834,14 +881,16 @@ export default function ReconcilePage() {
           row.transferTo,
         ),
       );
+      const tid = rowId ? `Transfers:${rowId}` : `Transfers:missing:${index}`;
+      const userDismissed = userDismissedRowKeys.has(tid);
       return {
-        id: rowId ? `Transfers:${rowId}` : `Transfers:missing:${index}`,
+        id: tid,
         source: "Transfers",
         dateValue,
         title,
         subtitle: `Transfer • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
-        isCompleted: claimed || Boolean(status?.isComplete) || autoCompleted,
+        isCompleted: claimed || Boolean(status?.isComplete) || autoCompleted || userDismissed,
         transferFrom: row.transferFrom,
         transferTo: row.transferTo,
       };
@@ -856,15 +905,20 @@ export default function ReconcilePage() {
     sheetExpenses,
     sheetTransfers,
     transferClaimStatusByRowId,
+    userDismissedRowKeys,
   ]);
 
-  const allStatementReviewMatches = useMemo(() => {
+  /** Unprocessed bank lines across accounts — includes exact_match etc., not only manual-review rows. */
+  const allUnprocessedStatementMatchesForClaim = useMemo(() => {
     const list: MatchResult[] = [];
     for (const account of tabAccounts) {
-      list.push(...(statementReviewRowsByAccount[account] ?? []));
+      for (const m of statementRowsByAccount[account] ?? []) {
+        if (processedHashes.has(m.bankTransaction.hash)) continue;
+        list.push(m);
+      }
     }
     return sortByNewestDate(list, (match) => match.bankTransaction.date);
-  }, [statementReviewRowsByAccount, tabAccounts]);
+  }, [processedHashes, statementRowsByAccount, tabAccounts]);
 
   const userInputtedReviewRows = useMemo(
     () => userInputtedEntries.filter((e) => !e.isCompleted),
@@ -875,9 +929,9 @@ export default function ReconcilePage() {
     () =>
       userInputtedReviewRows.map((entry) => ({
         entry,
-        suggestedBank: findBestStatementMatchForUserEntry(entry, allStatementReviewMatches),
+        suggestedBank: findBestStatementMatchForUserEntry(entry, allUnprocessedStatementMatchesForClaim),
       })),
-    [allStatementReviewMatches, userInputtedReviewRows],
+    [allUnprocessedStatementMatchesForClaim, userInputtedReviewRows],
   );
 
   const homeFilteredIncompleteRows = useMemo(() => {
@@ -965,11 +1019,50 @@ export default function ReconcilePage() {
     return rows;
   }, [allHomeMatchedMatches, homeAccountFilter, homeSearchQuery]);
 
+  const homeFilteredUserDismissedRows = useMemo(() => {
+    let rows = userInputtedEntries.filter((e) => userDismissedRowKeys.has(e.id));
+    const q = normalizeText(homeSearchQuery);
+    if (q) {
+      rows = rows.filter((entry) => {
+        const hay = [
+          entry.title,
+          entry.subtitle,
+          entry.source,
+          entry.expenseAccount,
+          entry.transferFrom,
+          entry.transferTo,
+          userDismissalNotesByEntryId[entry.id],
+        ]
+          .map((v) => normalizeText(v))
+          .join(" ");
+        return hay.includes(q);
+      });
+    }
+    if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
+      rows = rows.filter((entry) => {
+        if (entry.source === "Expenses" && entry.expenseAccount === homeAccountFilter) return true;
+        if (entry.source === "Transfers") {
+          return (
+            entry.transferFrom === homeAccountFilter || entry.transferTo === homeAccountFilter
+          );
+        }
+        return false;
+      });
+    }
+    return sortByNewestDate(rows, (entry) => entry.dateValue);
+  }, [
+    homeAccountFilter,
+    homeSearchQuery,
+    userDismissalNotesByEntryId,
+    userDismissedRowKeys,
+    userInputtedEntries,
+  ]);
+
   const userClaimFilteredStatementLines = useMemo(() => {
     if (!userStatementClaimModal.open || !userStatementClaimModal.entry) return [];
     const entry = userStatementClaimModal.entry;
     const userCents = toCents(Math.abs(entry.amount));
-    let list = allStatementReviewMatches.filter(
+    let list = allUnprocessedStatementMatchesForClaim.filter(
       (m) => toCents(Math.abs(m.bankTransaction.amount)) === userCents,
     );
     if (userStatementClaimModal.accountFilter !== ALL_ACCOUNTS_OPTION) {
@@ -988,7 +1081,7 @@ export default function ReconcilePage() {
       });
     }
     return list;
-  }, [allStatementReviewMatches, userStatementClaimModal]);
+  }, [allUnprocessedStatementMatchesForClaim, userStatementClaimModal]);
 
   const openQuickAdd = useCallback((match: MatchResult) => {
     const tx = match.bankTransaction;
@@ -1445,15 +1538,23 @@ export default function ReconcilePage() {
     const accounts = Object.keys(statementCsvRowsByAccountRef.current);
     if (accounts.length === 0) return;
 
-    const [sheetRows, sheetTransfers, processedHashesRes, dismissalsRes, claimsRes, transferClaimsRes] =
-      await Promise.all([
-        getExpenses(),
-        getTransfers(),
-        fetch("/api/reconciliation/processed", { cache: "no-store" }),
-        fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
-        fetch("/api/reconciliation/claims", { cache: "no-store" }),
-        fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
-      ]);
+    const [
+      sheetRows,
+      sheetTransfers,
+      processedHashesRes,
+      dismissalsRes,
+      userDismissalsRes,
+      claimsRes,
+      transferClaimsRes,
+    ] = await Promise.all([
+      getExpenses(),
+      getTransfers(),
+      fetch("/api/reconciliation/processed", { cache: "no-store" }),
+      fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+      fetch("/api/reconciliation/user-dismissals", { cache: "no-store" }),
+      fetch("/api/reconciliation/claims", { cache: "no-store" }),
+      fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+    ]);
 
     if (!processedHashesRes.ok) {
       const err = await processedHashesRes.json().catch(() => ({ error: processedHashesRes.statusText }));
@@ -1462,6 +1563,10 @@ export default function ReconcilePage() {
     if (!dismissalsRes.ok) {
       const err = await dismissalsRes.json().catch(() => ({ error: dismissalsRes.statusText }));
       throw new Error(err.error || "Failed to load dismissals.");
+    }
+    if (!userDismissalsRes.ok) {
+      const err = await userDismissalsRes.json().catch(() => ({ error: userDismissalsRes.statusText }));
+      throw new Error(err.error || "Failed to load user dismissals.");
     }
     if (!claimsRes.ok) {
       const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
@@ -1482,6 +1587,18 @@ export default function ReconcilePage() {
       dismissalMap[`${d.accountName}|${d.hash}`] = d.note;
     }
     setDismissalNotesById(dismissalMap);
+    const userDismissalsData = (await userDismissalsRes.json()) as {
+      dismissedKeys?: string[];
+      dismissals?: Array<{ sheetName: string; sheetRowId: string; note: string }>;
+    };
+    setUserDismissedRowKeys(
+      new Set<string>((userDismissalsData.dismissedKeys ?? []).map((k) => String(k))),
+    );
+    const userNoteMap: Record<string, string> = {};
+    for (const d of userDismissalsData.dismissals ?? []) {
+      userNoteMap[claimKey(d.sheetName, d.sheetRowId)] = d.note;
+    }
+    setUserDismissalNotesByEntryId(userNoteMap);
     const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
     const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
     const transferClaimsData = (await transferClaimsRes.json()) as {
@@ -1634,6 +1751,60 @@ export default function ReconcilePage() {
     }
   }, [dismissModal.match, dismissModal.note]);
 
+  const openUserDismissModal = useCallback((entry: UserInputtedEntry) => {
+    setUserDismissModal({
+      open: true,
+      entry,
+      note: "",
+      submitting: false,
+      error: "",
+    });
+  }, []);
+
+  const closeUserDismissModal = useCallback(() => {
+    setUserDismissModal({ open: false, entry: null, note: "", submitting: false, error: "" });
+  }, []);
+
+  const handleUserDismissSubmit = useCallback(async () => {
+    const entry = userDismissModal.entry;
+    if (!entry) return;
+    const parsed = parseSheetDismissKeyFromEntryId(entry.id);
+    if (!parsed) {
+      setUserDismissModal((prev) => ({ ...prev, error: "This row cannot be dismissed (missing row id)." }));
+      return;
+    }
+    const note = userDismissModal.note.trim();
+    if (!note) {
+      setUserDismissModal((prev) => ({ ...prev, error: "Enter a note." }));
+      return;
+    }
+    setUserDismissModal((prev) => ({ ...prev, submitting: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/user-dismissals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sheetName: parsed.sheetName,
+          sheetRowId: parsed.sheetRowId,
+          note,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to save dismissal (${res.status})`);
+      }
+      setUserDismissedRowKeys((prev) => new Set(prev).add(entry.id));
+      setUserDismissalNotesByEntryId((prev) => ({ ...prev, [entry.id]: note }));
+      setUserDismissModal({ open: false, entry: null, note: "", submitting: false, error: "" });
+    } catch (err) {
+      setUserDismissModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: err instanceof Error ? err.message : "Failed to dismiss.",
+      }));
+    }
+  }, [userDismissModal.entry, userDismissModal.note]);
+
   const openResetReconcileModal = useCallback(() => {
     setResetReconcileModal({ open: true, confirmText: "", submitting: false, error: "" });
   }, []);
@@ -1668,6 +1839,8 @@ export default function ReconcilePage() {
       statementCsvRowsByAccountRef.current = {};
       setProcessedHashes(new Set());
       setDismissalNotesById({});
+      setUserDismissedRowKeys(new Set());
+      setUserDismissalNotesByEntryId({});
       setDisconnectedIds(new Set());
       setClaimedRowKeys(new Set());
       setTransferClaimStatusByRowId({});
@@ -2088,15 +2261,23 @@ export default function ReconcilePage() {
           [selectedAccount]: mergedCsv,
         };
 
-        const [sheetRows, sheetTransfers, processedHashesRes, dismissalsRes, claimsRes, transferClaimsRes] =
-          await Promise.all([
-            getExpenses(),
-            getTransfers(),
-            fetch("/api/reconciliation/processed", { cache: "no-store" }),
-            fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
-            fetch("/api/reconciliation/claims", { cache: "no-store" }),
-            fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
-          ]);
+        const [
+          sheetRows,
+          sheetTransfers,
+          processedHashesRes,
+          dismissalsRes,
+          userDismissalsRes,
+          claimsRes,
+          transferClaimsRes,
+        ] = await Promise.all([
+          getExpenses(),
+          getTransfers(),
+          fetch("/api/reconciliation/processed", { cache: "no-store" }),
+          fetch("/api/reconciliation/dismissals", { cache: "no-store" }),
+          fetch("/api/reconciliation/user-dismissals", { cache: "no-store" }),
+          fetch("/api/reconciliation/claims", { cache: "no-store" }),
+          fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+        ]);
         if (!processedHashesRes.ok) {
           const err = await processedHashesRes.json().catch(() => ({ error: processedHashesRes.statusText }));
           throw new Error(err.error || "Failed to load processed hashes.");
@@ -2104,6 +2285,10 @@ export default function ReconcilePage() {
         if (!dismissalsRes.ok) {
           const err = await dismissalsRes.json().catch(() => ({ error: dismissalsRes.statusText }));
           throw new Error(err.error || "Failed to load dismissals.");
+        }
+        if (!userDismissalsRes.ok) {
+          const err = await userDismissalsRes.json().catch(() => ({ error: userDismissalsRes.statusText }));
+          throw new Error(err.error || "Failed to load user dismissals.");
         }
         if (!claimsRes.ok) {
           const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
@@ -2123,6 +2308,18 @@ export default function ReconcilePage() {
           dismissalMap[`${d.accountName}|${d.hash}`] = d.note;
         }
         setDismissalNotesById(dismissalMap);
+        const userDismissalsData = (await userDismissalsRes.json()) as {
+          dismissedKeys?: string[];
+          dismissals?: Array<{ sheetName: string; sheetRowId: string; note: string }>;
+        };
+        setUserDismissedRowKeys(
+          new Set<string>((userDismissalsData.dismissedKeys ?? []).map((k) => String(k))),
+        );
+        const userNoteMap: Record<string, string> = {};
+        for (const d of userDismissalsData.dismissals ?? []) {
+          userNoteMap[claimKey(d.sheetName, d.sheetRowId)] = d.note;
+        }
+        setUserDismissalNotesByEntryId(userNoteMap);
         const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
         const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
         const transferClaimsData = (await transferClaimsRes.json()) as {
@@ -2464,13 +2661,24 @@ export default function ReconcilePage() {
                                   <Check className="w-4 h-4" />
                                 )}
                               </button>
+                              {match && (
+                                <button
+                                  type="button"
+                                  onClick={() => openDismissModal(match)}
+                                  className="p-1.5 rounded-md text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/10 transition-colors"
+                                  aria-label="Dismiss statement line with note"
+                                  title="Dismiss statement line (bank) with note"
+                                >
+                                  <Ban className="w-4 h-4" />
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                onClick={() => match && openDismissModal(match)}
-                                disabled={!match}
+                                onClick={() => openUserDismissModal(entry)}
+                                disabled={!parseSheetDismissKeyFromEntryId(entry.id)}
                                 className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 disabled:opacity-60 transition-colors"
-                                aria-label="Dismiss with note"
-                                title="Dismiss with note"
+                                aria-label="Dismiss user-inputted row with note"
+                                title="Dismiss user-inputted row with note"
                               >
                                 <X className="w-4 h-4" />
                               </button>
@@ -2580,6 +2788,60 @@ export default function ReconcilePage() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+                <h2 className="text-white font-semibold">User-inputted: Dismissed</h2>
+                <span className="text-xs text-gray-300">{homeFilteredUserDismissedRows.length}</span>
+              </div>
+              <div className="p-3 text-sm">
+                {userDismissedRowKeys.size === 0 ? (
+                  <p className="text-gray-400">No user-inputted rows dismissed yet.</p>
+                ) : homeFilteredUserDismissedRows.length === 0 ? (
+                  <p className="text-gray-400">No rows match your search or account filter.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {homeFilteredUserDismissedRows.map((entry, index) => (
+                      <div
+                        key={`${entry.id}-${index}`}
+                        className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                      >
+                        <div className="grid gap-3 md:grid-cols-2 items-start">
+                          <div className="min-w-0">
+                            <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                              User-inputted
+                            </p>
+                            {entry.source === "Expenses" ? (
+                              <>
+                                <p className="text-yellow-300 text-sm truncate">{entry.title}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {entry.subtitle} • {fmtMoney(entry.amount)}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-green-300 text-sm truncate">{entry.title}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {entry.subtitle} • {fmtMoney(entry.amount)}
+                                </p>
+                              </>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                              Note
+                            </p>
+                            <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                              {userDismissalNotesByEntryId[entry.id] ?? "—"}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -3015,6 +3277,76 @@ export default function ReconcilePage() {
           </div>
         </div>
       )}
+      {userDismissModal.open && userDismissModal.entry && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeUserDismissModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dismiss-user-sheet-title"
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <h2 id="dismiss-user-sheet-title" className="text-white font-semibold">
+                Dismiss user-inputted row
+              </h2>
+              <button
+                type="button"
+                onClick={closeUserDismissModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="rounded-md border border-charcoal-dark bg-charcoal px-3 py-2 text-sm text-gray-300">
+                <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                  {userDismissModal.entry.source}
+                </p>
+                <p className="text-gray-100 truncate">{userDismissModal.entry.title}</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {userDismissModal.entry.subtitle} • {fmtMoney(userDismissModal.entry.amount)}
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Note (saved to Neon)</label>
+                <textarea
+                  value={userDismissModal.note}
+                  onChange={(e) =>
+                    setUserDismissModal((prev) => ({ ...prev, note: e.target.value, error: "" }))
+                  }
+                  rows={4}
+                  placeholder="e.g. Duplicate entry; entered in error."
+                  className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none resize-y min-h-[96px]"
+                />
+              </div>
+              {userDismissModal.error && <p className="text-xs text-red-400">{userDismissModal.error}</p>}
+            </div>
+            <div className="px-4 py-3 border-t border-charcoal-dark flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeUserDismissModal}
+                className="px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleUserDismissSubmit()}
+                disabled={userDismissModal.submitting}
+                className="px-3 py-1.5 rounded-lg text-sm bg-amber-700/90 text-white hover:bg-amber-700 transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {userDismissModal.submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Save dismissal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {resetReconcileModal.open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
@@ -3044,8 +3376,9 @@ export default function ReconcilePage() {
               <p>
                 This removes <span className="text-gray-200">statement match data</span> from this
                 browser, and deletes in Neon: processed hashes, claim links, transfer claims,
-                dismissal notes, and uploaded-file history. Your Google Sheet expenses are not
-                changed. Statement ending balances (anchors) are kept.
+                dismissal notes (statement and user-inputted sheet rows), and uploaded-file history.
+                Your Google Sheet expenses are not changed. Statement ending balances (anchors) are
+                kept.
               </p>
               <p className="text-xs text-gray-500">
                 Type{" "}
@@ -3295,7 +3628,8 @@ export default function ReconcilePage() {
                 </p>
               </div>
               <p className="text-xs text-gray-400">
-                Only statement lines that still need reconciliation and match this amount are listed.
+                Lists unprocessed statement lines (all accounts when Account is All) whose amount matches this
+                entry. Search and account filter narrow the list.
               </p>
               {userStatementClaimModal.entry.source === "Transfers" && (
                 <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-2">

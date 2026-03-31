@@ -12,6 +12,9 @@ export const EXPENSE_CATEGORIES = [
   "Rent",
   "Tithing",
   "Investments",
+  "Gifts",
+  "Beauty",
+  "Subscriptions",
 ] as const;
 
 // Expense Type dropdown: categories + Income
@@ -30,6 +33,9 @@ export const PIE_COLORS = [
   "#663399", // purple
   "#ffffcc", // light yellow
   "#4EA8FF", // blue (Investments)
+  "#E91E63", // pink (Gifts)
+  "#00ACC1", // cyan (Beauty)
+  "#A1887F", // warm gray-brown (Subscriptions)
 ];
 
 /** Fixed color per category — same in pie chart and table, consistent month to month */

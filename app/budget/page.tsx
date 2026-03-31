@@ -681,7 +681,7 @@ export default function BudgetPage() {
                           </span>
                         </span>
                         <span className="w-[72px] shrink-0 text-right text-gray-400 tabular-nums text-xs">
-                          {budget > 0 ? fmtDollars(budget) : "—"}
+                          {fmtDollars(budget)}
                         </span>
                       </button>
                     );
@@ -1162,9 +1162,8 @@ export default function BudgetPage() {
                   {selectedCategory}
                   <span className="ml-2 font-medium text-gray-300">
                     &mdash; Spent: {fmtDollars(expenseData.find((d) => d.category === selectedCategory)?.total ?? 0)}
-                    {(budgetGoals[selectedCategory] ?? 0) > 0 && (
-                      <> / Budget: {fmtDollars(budgetGoals[selectedCategory])}</>
-                    )}
+                    {" "}
+                    / Budget: {fmtDollars(budgetGoals[selectedCategory] ?? 0)}
                   </span>
                 </h2>
                 <button
