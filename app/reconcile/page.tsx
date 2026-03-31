@@ -276,78 +276,6 @@ function normalizeText(raw?: string): string {
     .trim();
 }
 
-function parseExpenseRowIdFromEntryId(id: string): string | null {
-  if (!id.startsWith("Expenses:")) return null;
-  const rest = id.slice("Expenses:".length);
-  if (rest.startsWith("missing:")) return null;
-  return rest || null;
-}
-
-function parseTransferRowIdFromEntryId(id: string): string | null {
-  if (!id.startsWith("Transfers:")) return null;
-  const rest = id.slice("Transfers:".length);
-  if (rest.startsWith("missing:")) return null;
-  return rest || null;
-}
-
-function dateDistanceInDaysSafe(a: string, b: string): number {
-  const na = normalizeDateOnly(a);
-  const nb = normalizeDateOnly(b);
-  if (!na || !nb) return 9999;
-  const da = Date.parse(na);
-  const db = Date.parse(nb);
-  if (!Number.isFinite(da) || !Number.isFinite(db)) return 9999;
-  return Math.abs(Math.round((db - da) / (86400 * 1000)));
-}
-
-function findBestStatementMatchForUserEntry(
-  entry: UserInputtedEntry,
-  reviewMatches: MatchResult[],
-): MatchResult | null {
-  const absAmt = Math.abs(entry.amount);
-  const centsUser = toCents(absAmt);
-
-  if (entry.source === "Expenses") {
-    const rowId = parseExpenseRowIdFromEntryId(entry.id);
-    if (rowId) {
-      const direct = reviewMatches.find(
-        (m) => String(m.matchedSheetExpense?.rowId ?? "").trim() === rowId,
-      );
-      if (direct) return direct;
-    }
-    const candidates = reviewMatches.filter(
-      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
-    );
-    if (candidates.length === 0) return null;
-    return [...candidates].sort(
-      (a, b) =>
-        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
-        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
-    )[0];
-  }
-
-  if (entry.source === "Transfers") {
-    const rowId = parseTransferRowIdFromEntryId(entry.id);
-    if (rowId) {
-      const direct = reviewMatches.find(
-        (m) => String(m.matchedSheetTransfer?.transferRowId ?? "").trim() === rowId,
-      );
-      if (direct) return direct;
-    }
-    const candidates = reviewMatches.filter(
-      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
-    );
-    if (candidates.length === 0) return null;
-    return [...candidates].sort(
-      (a, b) =>
-        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
-        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
-    )[0];
-  }
-
-  return null;
-}
-
 function buildExpenseSignature(amount: number, dateRaw?: string, description?: string): string {
   return `${toCents(Math.abs(Number(amount) || 0))}|${normalizeDateOnly(dateRaw)}|${normalizeText(description)}`;
 }
@@ -837,44 +765,33 @@ export default function ReconcilePage() {
     transferClaimStatusByRowId,
   ]);
 
-  const userInputtedReviewRows = useMemo(
-    () => userInputtedEntries.filter((entry) => !entry.isCompleted),
-    [userInputtedEntries],
-  );
-
   const allStatementReviewMatches = useMemo(() => {
     const list: MatchResult[] = [];
     for (const account of tabAccounts) {
       list.push(...(statementReviewRowsByAccount[account] ?? []));
     }
-    return list;
+    return sortByNewestDate(list, (match) => match.bankTransaction.date);
   }, [statementReviewRowsByAccount, tabAccounts]);
 
-  const homeRowsWithMatch = useMemo(
-    () =>
-      userInputtedReviewRows.map((entry) => ({
-        entry,
-        match: findBestStatementMatchForUserEntry(entry, allStatementReviewMatches),
-      })),
-    [allStatementReviewMatches, userInputtedReviewRows],
-  );
-
   const homeFilteredRows = useMemo(() => {
-    let rows = homeRowsWithMatch;
+    let rows = allStatementReviewMatches;
     const q = normalizeText(homeSearchQuery);
     if (q) {
-      rows = rows.filter(({ entry, match }) => {
-        const tx = match?.bankTransaction;
+      rows = rows.filter((match) => {
+        const tx = match.bankTransaction;
+        const exp = match.matchedSheetExpense;
+        const tr = match.matchedSheetTransfer;
         const hay = [
-          entry.title,
-          entry.subtitle,
-          entry.source,
-          entry.expenseAccount,
-          entry.transferFrom,
-          entry.transferTo,
-          tx?.description,
-          tx?.accountName,
-          tx?.date,
+          tx.description,
+          tx.accountName,
+          tx.date,
+          exp?.description,
+          exp?.expenseType,
+          exp?.account,
+          exp?.rowId,
+          tr?.transferFrom,
+          tr?.transferTo,
+          tr?.transferRowId,
         ]
           .map((v) => normalizeText(v))
           .join(" ");
@@ -882,19 +799,10 @@ export default function ReconcilePage() {
       });
     }
     if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
-      rows = rows.filter(({ entry, match }) => {
-        if (match?.bankTransaction.accountName === homeAccountFilter) return true;
-        if (entry.source === "Expenses" && entry.expenseAccount === homeAccountFilter) return true;
-        if (entry.source === "Transfers") {
-          return (
-            entry.transferFrom === homeAccountFilter || entry.transferTo === homeAccountFilter
-          );
-        }
-        return false;
-      });
+      rows = rows.filter((match) => match.bankTransaction.accountName === homeAccountFilter);
     }
     return rows;
-  }, [homeAccountFilter, homeRowsWithMatch, homeSearchQuery]);
+  }, [allStatementReviewMatches, homeAccountFilter, homeSearchQuery]);
 
   const openQuickAdd = useCallback((match: MatchResult) => {
     const tx = match.bankTransaction;
@@ -2078,24 +1986,23 @@ export default function ReconcilePage() {
                 </div>
               </div>
               <div className="p-3 text-sm">
-                {userInputtedReviewRows.length === 0 ? (
-                  <p className="text-gray-400">No unmatched or questionable user-inputted transactions.</p>
+                {allStatementReviewMatches.length === 0 ? (
+                  <p className="text-gray-400">No rows requiring manual review across accounts.</p>
                 ) : homeFilteredRows.length === 0 ? (
                   <p className="text-gray-400">No rows match your search or account filter.</p>
                 ) : (
                   <div className="space-y-2">
-                    {homeFilteredRows.map(({ entry, match }, index) => {
-                      const tx = match?.bankTransaction;
-                      const id = tx ? idForTx(tx) : `no-statement:${entry.id}`;
+                    {homeFilteredRows.map((match, index) => {
+                      const tx = match.bankTransaction;
+                      const id = idForTx(tx);
                       const isTransferCandidate = Boolean(
-                        match &&
-                          (match.matchType === "transfer" ||
-                            match.matchType === "questionable_match_fuzzy") &&
-                          match.matchedSheetTransfer?.transferRowId,
+                        (match.matchType === "transfer" ||
+                          match.matchType === "questionable_match_fuzzy") &&
+                          Boolean(match.matchedSheetTransfer?.transferRowId),
                       );
                       return (
                         <div
-                          key={`${entry.id}-${index}`}
+                          key={`${id}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
                           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
@@ -2103,39 +2010,64 @@ export default function ReconcilePage() {
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 User-inputted
                               </p>
-                              <p className="text-gray-200 font-medium truncate">{entry.title}</p>
-                              <p className="text-xs text-gray-400 mt-0.5">
-                                {entry.source} • {entry.subtitle} • {fmtMoney(entry.amount)}
-                              </p>
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                Possible Statement Match
-                              </p>
-                              {tx ? (
+                              {match.matchedSheetExpense ? (
                                 <>
-                                  <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
+                                  <p className="text-yellow-300 text-sm truncate">
+                                    {match.matchedSheetExpense.description || "—"}
+                                  </p>
                                   <p className="text-xs text-gray-400 mt-0.5">
-                                    {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetExpense.amount)}
+                                    {match.matchedSheetExpense.account
+                                      ? ` • ${match.matchedSheetExpense.account}`
+                                      : ""}
+                                  </p>
+                                </>
+                              ) : match.matchedSheetTransfer ? (
+                                <>
+                                  <p
+                                    className={`text-sm truncate ${
+                                      match.matchType === "transfer" ? "text-green-300" : "text-yellow-300"
+                                    }`}
+                                  >
+                                    {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                    {(match.matchedSheetTransfer.transferTo ?? "—")}
+                                  </p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    Transfer •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetTransfer.timestamp ??
+                                        match.matchedSheetTransfer.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetTransfer.amount)}
                                   </p>
                                 </>
                               ) : (
-                                <p className="text-xs text-gray-500">
-                                  No statement line linked yet. Upload a CSV for this account or open account
-                                  detail to reconcile bank-only lines.
-                                </p>
+                                <p className="text-xs text-gray-500">No candidate match</p>
                               )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Bank Transaction
+                              </p>
+                              <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                              </p>
                             </div>
                             <div className="shrink-0 flex items-center gap-1">
                               <button
                                 type="button"
-                                onClick={() => match && handleApprove(match)}
-                                disabled={!match || processingId === id}
+                                onClick={() => handleApprove(match)}
+                                disabled={processingId === id}
                                 className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
                                 aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
                                 title={isTransferCandidate ? "Claim transfer leg" : "Approve and mark processed"}
                               >
-                                {match && processingId === id ? (
+                                {processingId === id ? (
                                   <Loader2 className="w-4 h-4 animate-spin" />
                                 ) : (
                                   <Check className="w-4 h-4" />
@@ -2143,9 +2075,8 @@ export default function ReconcilePage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => match && openDismissModal(match)}
-                                disabled={!match}
-                                className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 disabled:opacity-60 transition-colors"
+                                onClick={() => openDismissModal(match)}
+                                className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
                                 aria-label="Dismiss with note"
                                 title="Dismiss with note"
                               >
@@ -2153,9 +2084,9 @@ export default function ReconcilePage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => match && openQuickAdd(match)}
-                                disabled={!match || Boolean(match.matchedSheetTransfer)}
-                                className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 disabled:opacity-60 transition-colors"
+                                onClick={() => openQuickAdd(match)}
+                                disabled={Boolean(match.matchedSheetTransfer)}
+                                className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 transition-colors"
                                 aria-label="Quick add"
                                 title="Quick add to sheet"
                               >
@@ -2163,9 +2094,9 @@ export default function ReconcilePage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => match && openSplitModal(match)}
-                                disabled={!match || Boolean(match.matchedSheetTransfer)}
-                                className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 disabled:opacity-60 transition-colors"
+                                onClick={() => openSplitModal(match)}
+                                disabled={Boolean(match.matchedSheetTransfer)}
+                                className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 transition-colors"
                                 aria-label="Claim existing rows"
                                 title="Claim existing unmatched sheet rows"
                               >

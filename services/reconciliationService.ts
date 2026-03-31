@@ -4,6 +4,8 @@ export type BankProfile = {
   dateIndex: number | null;
   amountIndex: number | null;
   descriptionIndex: number | null;
+  debitIndex?: number | null;
+  creditIndex?: number | null;
 };
 
 export const BANK_PROFILES: Record<string, BankProfile> = {
@@ -18,9 +20,11 @@ export const BANK_PROFILES: Record<string, BankProfile> = {
     descriptionIndex: 4,
   },
   "Capital One": {
-    dateIndex: null,
+    dateIndex: 0,
     amountIndex: null,
-    descriptionIndex: null,
+    descriptionIndex: 3,
+    debitIndex: 5,
+    creditIndex: 6,
   },
   "America First": {
     dateIndex: null,
@@ -162,9 +166,11 @@ function toIndexedMap(rows: SheetExpenseLike[]): Map<string, SheetExpenseLike[]>
 }
 
 function isProfileConfigured(profile: BankProfile): boolean {
+  const hasSingleAmount = profile.amountIndex !== null;
+  const hasSplitDebitCredit = profile.debitIndex !== null && profile.creditIndex !== null;
   return (
     profile.dateIndex !== null &&
-    profile.amountIndex !== null &&
+    (hasSingleAmount || hasSplitDebitCredit) &&
     profile.descriptionIndex !== null
   );
 }
@@ -195,6 +201,10 @@ function isVenmoProfile(accountName: string): boolean {
   return accountName.trim().toLowerCase() === "venmo";
 }
 
+function isCapitalOneProfile(accountName: string): boolean {
+  return accountName.trim().toLowerCase() === "capital one";
+}
+
 function resolveVenmoProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
   if (!Array.isArray(rows) || !isProfileConfigured(fallback)) {
     return { profile: fallback, startRowIndex: 0 };
@@ -218,6 +228,41 @@ function resolveVenmoProfile(rows: string[][], fallback: BankProfile): ResolvedB
           dateIndex,
           amountIndex,
           descriptionIndex,
+        },
+        startRowIndex: i + 1,
+      };
+    }
+  }
+
+  return { profile: fallback, startRowIndex: 0 };
+}
+
+function resolveCapitalOneProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
+  if (!Array.isArray(rows)) {
+    return { profile: fallback, startRowIndex: 0 };
+  }
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i] ?? [];
+    const normalized = row.map((cell) => normalizeHeaderCell(cell));
+    const dateIndex = normalized.findIndex(
+      (cell) =>
+        cell === "transaction date" ||
+        cell === "transactiondate" ||
+        cell === "date",
+    );
+    const descriptionIndex = normalized.findIndex((cell) => cell === "description");
+    const debitIndex = normalized.findIndex((cell) => cell === "debit");
+    const creditIndex = normalized.findIndex((cell) => cell === "credit");
+
+    if (dateIndex >= 0 && descriptionIndex >= 0 && debitIndex >= 0 && creditIndex >= 0) {
+      return {
+        profile: {
+          dateIndex,
+          amountIndex: null,
+          descriptionIndex,
+          debitIndex,
+          creditIndex,
         },
         startRowIndex: i + 1,
       };
@@ -361,15 +406,27 @@ export function mapBankRowToTransaction(
   if (!profile || !isProfileConfigured(profile)) return null;
 
   const dateIndex = profile.dateIndex as number;
-  const amountIndex = profile.amountIndex as number;
   const descriptionIndex = profile.descriptionIndex as number;
   const postedDate = String(row[dateIndex] ?? "").trim();
-  const rawAmount = String(row[amountIndex] ?? "");
   const rawDescription = String(row[descriptionIndex] ?? "").trim();
   const description = cleanBankDescription(rawDescription);
   const derivedDate = deriveBankTransactionDate(String(accountName), postedDate, rawDescription);
   const date = normalizeDateOnly(derivedDate);
-  const amount = parseBankAmount(rawAmount);
+  let amount: number | null = null;
+  if (profile.amountIndex !== null) {
+    const rawAmount = String(row[profile.amountIndex] ?? "");
+    amount = parseBankAmount(rawAmount);
+  } else if (profile.debitIndex !== null && profile.creditIndex !== null) {
+    const debitAmount = parseBankAmount(String(row[profile.debitIndex] ?? ""));
+    const creditAmount = parseBankAmount(String(row[profile.creditIndex] ?? ""));
+    if (debitAmount !== null && Math.abs(debitAmount) > 0) {
+      amount = Math.abs(debitAmount);
+    } else if (creditAmount !== null && Math.abs(creditAmount) > 0) {
+      amount = -Math.abs(creditAmount);
+    } else {
+      amount = null;
+    }
+  }
   if (!date || !description || amount === null) return null;
 
   return {
@@ -391,7 +448,9 @@ export function mapBankRowsToTransactions(
 
   const resolved = isVenmoProfile(String(accountName))
     ? resolveVenmoProfile(rows, fallbackProfile)
-    : { profile: fallbackProfile, startRowIndex: 0 };
+    : isCapitalOneProfile(String(accountName))
+      ? resolveCapitalOneProfile(rows, fallbackProfile)
+      : { profile: fallbackProfile, startRowIndex: 0 };
 
   return rows
     .slice(resolved.startRowIndex)
