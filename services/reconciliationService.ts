@@ -167,7 +167,8 @@ function toIndexedMap(rows: SheetExpenseLike[]): Map<string, SheetExpenseLike[]>
 
 function isProfileConfigured(profile: BankProfile): boolean {
   const hasSingleAmount = profile.amountIndex !== null;
-  const hasSplitDebitCredit = profile.debitIndex !== null && profile.creditIndex !== null;
+  const hasSplitDebitCredit =
+    profile.debitIndex != null && profile.creditIndex != null;
   return (
     profile.dateIndex !== null &&
     (hasSingleAmount || hasSplitDebitCredit) &&
@@ -416,9 +417,11 @@ export function mapBankRowToTransaction(
   if (profile.amountIndex !== null) {
     const rawAmount = String(row[profile.amountIndex] ?? "");
     amount = parseBankAmount(rawAmount);
-  } else if (profile.debitIndex !== null && profile.creditIndex !== null) {
-    const debitAmount = parseBankAmount(String(row[profile.debitIndex] ?? ""));
-    const creditAmount = parseBankAmount(String(row[profile.creditIndex] ?? ""));
+  } else if (profile.debitIndex != null && profile.creditIndex != null) {
+    const debitIdx = profile.debitIndex;
+    const creditIdx = profile.creditIndex;
+    const debitAmount = parseBankAmount(String(row[debitIdx] ?? ""));
+    const creditAmount = parseBankAmount(String(row[creditIdx] ?? ""));
     if (debitAmount !== null && Math.abs(debitAmount) > 0) {
       amount = Math.abs(debitAmount);
     } else if (creditAmount !== null && Math.abs(creditAmount) > 0) {
