@@ -652,7 +652,12 @@ export default function BudgetPage() {
                     .sort((a, b) => a.category.localeCompare(b.category))
                     .map((row, index) => {
                     const budget = budgetGoals[row.category] ?? 0;
-                    const pct = budget > 0 ? (row.total / budget) * 100 : 0;
+                    const pct =
+                      budget > 0
+                        ? (row.total / budget) * 100
+                        : row.total > 0
+                          ? 100
+                          : 0;
                     const barColor = getProgressColor(pct);
                     const barWidth = Math.min(pct, 100);
 
@@ -674,7 +679,7 @@ export default function BudgetPage() {
                             <span
                               className="block h-full rounded-full transition-all duration-500"
                               style={{
-                                width: budget > 0 ? `${barWidth}%` : "0%",
+                                width: `${barWidth}%`,
                                 backgroundColor: barColor,
                               }}
                             />
