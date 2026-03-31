@@ -1,10 +1,9 @@
 "use client";
 
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
-import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
-import { Check, Loader2, PlusCircle, Upload, X } from "lucide-react";
+import { Check, Filter, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   getExpenses,
@@ -98,6 +97,10 @@ type UserInputtedEntry = {
   subtitle: string;
   amount: number;
   isCompleted: boolean;
+  /** Sheet "account" column for expense rows; used by home account filter. */
+  expenseAccount?: string;
+  transferFrom?: string;
+  transferTo?: string;
 };
 
 type AnchorModalState = {
@@ -144,8 +147,6 @@ const CSV_PARSER_READY_ACCOUNTS = new Set<AccountOption>([
   "Venmo - Katie",
 ]);
 const RECONCILE_STORAGE_KEY = "reconcile-page-state-v3";
-
-const SHEET_BASE_LINK = process.env.NEXT_PUBLIC_GOOGLE_SHEET_URL ?? "";
 
 function claimKey(sheetName: string, rowId: string): string {
   return `${sheetName}:${rowId}`;
@@ -275,6 +276,78 @@ function normalizeText(raw?: string): string {
     .trim();
 }
 
+function parseExpenseRowIdFromEntryId(id: string): string | null {
+  if (!id.startsWith("Expenses:")) return null;
+  const rest = id.slice("Expenses:".length);
+  if (rest.startsWith("missing:")) return null;
+  return rest || null;
+}
+
+function parseTransferRowIdFromEntryId(id: string): string | null {
+  if (!id.startsWith("Transfers:")) return null;
+  const rest = id.slice("Transfers:".length);
+  if (rest.startsWith("missing:")) return null;
+  return rest || null;
+}
+
+function dateDistanceInDaysSafe(a: string, b: string): number {
+  const na = normalizeDateOnly(a);
+  const nb = normalizeDateOnly(b);
+  if (!na || !nb) return 9999;
+  const da = Date.parse(na);
+  const db = Date.parse(nb);
+  if (!Number.isFinite(da) || !Number.isFinite(db)) return 9999;
+  return Math.abs(Math.round((db - da) / (86400 * 1000)));
+}
+
+function findBestStatementMatchForUserEntry(
+  entry: UserInputtedEntry,
+  reviewMatches: MatchResult[],
+): MatchResult | null {
+  const absAmt = Math.abs(entry.amount);
+  const centsUser = toCents(absAmt);
+
+  if (entry.source === "Expenses") {
+    const rowId = parseExpenseRowIdFromEntryId(entry.id);
+    if (rowId) {
+      const direct = reviewMatches.find(
+        (m) => String(m.matchedSheetExpense?.rowId ?? "").trim() === rowId,
+      );
+      if (direct) return direct;
+    }
+    const candidates = reviewMatches.filter(
+      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort(
+      (a, b) =>
+        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
+        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
+    )[0];
+  }
+
+  if (entry.source === "Transfers") {
+    const rowId = parseTransferRowIdFromEntryId(entry.id);
+    if (rowId) {
+      const direct = reviewMatches.find(
+        (m) => String(m.matchedSheetTransfer?.transferRowId ?? "").trim() === rowId,
+      );
+      if (direct) return direct;
+    }
+    const candidates = reviewMatches.filter(
+      (m) => toCents(Math.abs(m.bankTransaction.amount)) === centsUser,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort(
+      (a, b) =>
+        dateDistanceInDaysSafe(a.bankTransaction.date, entry.dateValue) -
+        dateDistanceInDaysSafe(b.bankTransaction.date, entry.dateValue),
+    )[0];
+  }
+
+  return null;
+}
+
 function buildExpenseSignature(amount: number, dateRaw?: string, description?: string): string {
   return `${toCents(Math.abs(Number(amount) || 0))}|${normalizeDateOnly(dateRaw)}|${normalizeText(description)}`;
 }
@@ -311,11 +384,6 @@ function sheetTransferDateRaw(row: Pick<TransferRow, "timestamp" | "date">): str
 
 function toCents(value: number): number {
   return Math.round(value * 100);
-}
-
-function buildSheetLink(index?: number): string | null {
-  if (!SHEET_BASE_LINK || index === undefined || index < 0) return null;
-  return `${SHEET_BASE_LINK}#gid=0&range=A${index + 2}`;
 }
 
 function parseCsvFile(file: File): Promise<string[][]> {
@@ -378,6 +446,10 @@ export default function ReconcilePage() {
     error: "",
   });
   const [splitSearchQuery, setSplitSearchQuery] = useState("");
+  const [homeSearchQuery, setHomeSearchQuery] = useState("");
+  const [homeAccountFilter, setHomeAccountFilter] = useState<AccountOption | typeof ALL_ACCOUNTS_OPTION>(
+    ALL_ACCOUNTS_OPTION,
+  );
   const [transferClaimModal, setTransferClaimModal] = useState<TransferClaimModalState>({
     open: false,
     rowId: null,
@@ -648,20 +720,6 @@ export default function ReconcilePage() {
     return byAccount;
   }, [dismissalNotesById, processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
 
-  const statementSuggestedRowsByAccount = useMemo(() => {
-    const byAccount: Record<string, MatchResult[]> = {};
-    tabAccounts.forEach((account) => {
-      byAccount[account] = statementRowsByAccount[account].filter((match) => {
-        const id = idForTx(match.bankTransaction);
-        if (processedHashes.has(match.bankTransaction.hash) || disconnectedIds.has(id)) {
-          return false;
-        }
-        return match.matchType === "questionable_match_fuzzy" || match.matchType === "transfer";
-      });
-    });
-    return byAccount;
-  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
-
   const statementAutoMatchedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
@@ -674,20 +732,6 @@ export default function ReconcilePage() {
     });
     return byAccount;
   }, [dismissalNotesById, disconnectedIds, statementRowsByAccount, tabAccounts]);
-
-  const accountDetailRows = useMemo(
-    () => [
-      ...(statementReviewRowsByAccount[activeTab] ?? []),
-      ...(statementAutoMatchedRowsByAccount[activeTab] ?? []),
-      ...(statementCompletedRowsByAccount[activeTab] ?? []),
-    ],
-    [
-      activeTab,
-      statementAutoMatchedRowsByAccount,
-      statementCompletedRowsByAccount,
-      statementReviewRowsByAccount,
-    ],
-  );
 
   const autoCompletedExpenseSignatures = useMemo(() => {
     const signatures = new Set<string>();
@@ -751,6 +795,7 @@ export default function ReconcilePage() {
         subtitle: `${row.account ?? "No account"} • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
         isCompleted: claimed || tiedByExactMatch || autoCompleted,
+        expenseAccount: row.account?.trim() || undefined,
       };
     });
 
@@ -776,6 +821,8 @@ export default function ReconcilePage() {
         subtitle: `Transfer • ${fmtDate(dateValue)}`,
         amount: Number(row.amount ?? 0),
         isCompleted: claimed || Boolean(status?.isComplete) || autoCompleted,
+        transferFrom: row.transferFrom,
+        transferTo: row.transferTo,
       };
     });
 
@@ -794,10 +841,60 @@ export default function ReconcilePage() {
     () => userInputtedEntries.filter((entry) => !entry.isCompleted),
     [userInputtedEntries],
   );
-  const userInputtedCompletedRows = useMemo(
-    () => userInputtedEntries.filter((entry) => entry.isCompleted),
-    [userInputtedEntries],
+
+  const allStatementReviewMatches = useMemo(() => {
+    const list: MatchResult[] = [];
+    for (const account of tabAccounts) {
+      list.push(...(statementReviewRowsByAccount[account] ?? []));
+    }
+    return list;
+  }, [statementReviewRowsByAccount, tabAccounts]);
+
+  const homeRowsWithMatch = useMemo(
+    () =>
+      userInputtedReviewRows.map((entry) => ({
+        entry,
+        match: findBestStatementMatchForUserEntry(entry, allStatementReviewMatches),
+      })),
+    [allStatementReviewMatches, userInputtedReviewRows],
   );
+
+  const homeFilteredRows = useMemo(() => {
+    let rows = homeRowsWithMatch;
+    const q = normalizeText(homeSearchQuery);
+    if (q) {
+      rows = rows.filter(({ entry, match }) => {
+        const tx = match?.bankTransaction;
+        const hay = [
+          entry.title,
+          entry.subtitle,
+          entry.source,
+          entry.expenseAccount,
+          entry.transferFrom,
+          entry.transferTo,
+          tx?.description,
+          tx?.accountName,
+          tx?.date,
+        ]
+          .map((v) => normalizeText(v))
+          .join(" ");
+        return hay.includes(q);
+      });
+    }
+    if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
+      rows = rows.filter(({ entry, match }) => {
+        if (match?.bankTransaction.accountName === homeAccountFilter) return true;
+        if (entry.source === "Expenses" && entry.expenseAccount === homeAccountFilter) return true;
+        if (entry.source === "Transfers") {
+          return (
+            entry.transferFrom === homeAccountFilter || entry.transferTo === homeAccountFilter
+          );
+        }
+        return false;
+      });
+    }
+    return rows;
+  }, [homeAccountFilter, homeRowsWithMatch, homeSearchQuery]);
 
   const openQuickAdd = useCallback((match: MatchResult) => {
     const tx = match.bankTransaction;
@@ -1275,115 +1372,6 @@ export default function ReconcilePage() {
       }));
     }
   }, [resetReconcileModal.confirmText]);
-
-  const handleDisconnect = useCallback(
-    async (match: MatchResult) => {
-      const tx = match.bankTransaction;
-      const id = idForTx(tx);
-      setActionError("");
-      setProcessingId(id);
-      try {
-        const payload = {
-          bankTransaction: {
-            hash: tx.hash,
-            accountName: tx.accountName,
-          },
-        };
-        const [
-          processedRes,
-          dismissalsRes,
-          claimsRes,
-          transferClaimsRes,
-          refreshedClaimsRes,
-          refreshedTransferRes,
-        ] = await Promise.all([
-          fetch("/api/reconciliation/processed", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
-          }),
-          fetch("/api/reconciliation/dismissals", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
-          }),
-          fetch("/api/reconciliation/claims", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          }),
-          fetch("/api/reconciliation/transfer-claims", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          }),
-          fetch("/api/reconciliation/claims", { cache: "no-store" }),
-          fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
-        ]);
-
-        if (!processedRes.ok || !dismissalsRes.ok || !claimsRes.ok || !transferClaimsRes.ok) {
-          const err = await processedRes
-            .json()
-            .catch(async () =>
-              dismissalsRes.json().catch(async () =>
-                claimsRes.json().catch(async () =>
-                  transferClaimsRes.json().catch(() => ({
-                    error: "Failed to disconnect matched transaction.",
-                  })),
-                ),
-              ),
-            );
-          throw new Error(err.error || "Failed to disconnect matched transaction.");
-        }
-
-        if (refreshedClaimsRes.ok) {
-          const claimsData = (await refreshedClaimsRes.json()) as { claimedRowIds?: string[] };
-          setClaimedRowKeys(new Set((claimsData.claimedRowIds ?? []).map((rowId) => String(rowId))));
-        }
-        if (refreshedTransferRes.ok) {
-          const transferClaimsData = (await refreshedTransferRes.json()) as {
-            statusByRowId?: TransferClaimStatusByRowId;
-          };
-          setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
-        }
-
-        setProcessedHashes((prev) => {
-          const next = new Set(prev);
-          next.delete(tx.hash);
-          return next;
-        });
-        setDismissalNotesById((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setDisconnectedIds((prev) => new Set(prev).add(id));
-        setMatchesByAccount((prev) => {
-          const next: Record<string, MatchResult[]> = {};
-          for (const [account, rows] of Object.entries(prev)) {
-            next[account] = rows.map((row) => {
-              if (idForTx(row.bankTransaction) !== id) return row;
-              return {
-                ...row,
-                matchType: "unmatched",
-                reason: "Match removed manually; ready for rematch.",
-                matchedSheetExpense: undefined,
-                matchedSheetTransfer: undefined,
-                matchedSheetIndex: undefined,
-                matchedSheetTransferIndex: undefined,
-              };
-            });
-          }
-          return next;
-        });
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Failed to disconnect match.");
-      } finally {
-        setProcessingId(null);
-      }
-    },
-    [],
-  );
 
   const handleQuickAddSubmit = useCallback(async () => {
     if (!quickAdd.rowId) return;
@@ -2044,83 +2032,169 @@ export default function ReconcilePage() {
         )}
 
         {viewMode === "home" ? (
-          <div className="grid gap-4 lg:grid-cols-2">
-            <div className="space-y-4">
-              <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
                   <h2 className="text-white font-semibold">User-inputted: Unmatched / Questionable</h2>
-                  <span className="text-xs text-gray-300">{userInputtedReviewRows.length}</span>
+                  <span className="text-xs text-gray-300">{homeFilteredRows.length}</span>
                 </div>
-                <div className="p-3 text-sm">
-                  {userInputtedReviewRows.length === 0 ? (
-                    <p className="text-gray-400">No unmatched or questionable user-inputted transactions.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {userInputtedReviewRows.map((entry) => (
+                <div className="flex flex-col sm:flex-row flex-wrap gap-3 sm:items-end">
+                  <div className="flex flex-1 min-w-[200px] items-center gap-2">
+                    <Search className="w-4 h-4 text-gray-500 shrink-0" aria-hidden />
+                    <label htmlFor="home-reconcile-search" className="sr-only">
+                      Search transactions
+                    </label>
+                    <input
+                      id="home-reconcile-search"
+                      type="search"
+                      value={homeSearchQuery}
+                      onChange={(e) => setHomeSearchQuery(e.target.value)}
+                      placeholder="Search user text, statement description, account…"
+                      className="w-full px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Filter className="w-4 h-4 text-gray-500 shrink-0" aria-hidden />
+                    <label htmlFor="home-account-filter" className="text-xs text-gray-400 whitespace-nowrap">
+                      Account
+                    </label>
+                    <select
+                      id="home-account-filter"
+                      value={homeAccountFilter}
+                      onChange={(e) =>
+                        setHomeAccountFilter(e.target.value as AccountOption | typeof ALL_ACCOUNTS_OPTION)
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none min-w-[10rem]"
+                    >
+                      <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
+                      {ACCOUNT_OPTIONS.map((account) => (
+                        <option key={account} value={account}>
+                          {account}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div className="p-3 text-sm">
+                {userInputtedReviewRows.length === 0 ? (
+                  <p className="text-gray-400">No unmatched or questionable user-inputted transactions.</p>
+                ) : homeFilteredRows.length === 0 ? (
+                  <p className="text-gray-400">No rows match your search or account filter.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {homeFilteredRows.map(({ entry, match }, index) => {
+                      const tx = match?.bankTransaction;
+                      const id = tx ? idForTx(tx) : `no-statement:${entry.id}`;
+                      const isTransferCandidate = Boolean(
+                        match &&
+                          (match.matchType === "transfer" ||
+                            match.matchType === "questionable_match_fuzzy") &&
+                          match.matchedSheetTransfer?.transferRowId,
+                      );
+                      return (
                         <div
-                          key={entry.id}
+                          key={`${entry.id}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <p className="text-gray-200 truncate">{entry.title}</p>
-                          <p className="text-xs text-gray-400 mt-0.5">
-                            {entry.source} • {entry.subtitle} • {fmtMoney(entry.amount)}
-                          </p>
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                User-inputted
+                              </p>
+                              <p className="text-gray-200 font-medium truncate">{entry.title}</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {entry.source} • {entry.subtitle} • {fmtMoney(entry.amount)}
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Possible Statement Match
+                              </p>
+                              {tx ? (
+                                <>
+                                  <p className="text-gray-200 font-medium truncate">{tx.description || "—"}</p>
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                  </p>
+                                </>
+                              ) : (
+                                <p className="text-xs text-gray-500">
+                                  No statement line linked yet. Upload a CSV for this account or open account
+                                  detail to reconcile bank-only lines.
+                                </p>
+                              )}
+                            </div>
+                            <div className="shrink-0 flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => match && handleApprove(match)}
+                                disabled={!match || processingId === id}
+                                className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
+                                aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
+                                title={isTransferCandidate ? "Claim transfer leg" : "Approve and mark processed"}
+                              >
+                                {match && processingId === id ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Check className="w-4 h-4" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => match && openDismissModal(match)}
+                                disabled={!match}
+                                className="p-1.5 rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 disabled:opacity-60 transition-colors"
+                                aria-label="Dismiss with note"
+                                title="Dismiss with note"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => match && openQuickAdd(match)}
+                                disabled={!match || Boolean(match.matchedSheetTransfer)}
+                                className="p-1.5 rounded-md text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 disabled:opacity-60 transition-colors"
+                                aria-label="Quick add"
+                                title="Quick add to sheet"
+                              >
+                                <PlusCircle className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => match && openSplitModal(match)}
+                                disabled={!match || Boolean(match.matchedSheetTransfer)}
+                                className="px-2 py-1 rounded-md text-[11px] text-purple-300 hover:text-purple-200 hover:bg-purple-500/10 disabled:opacity-60 transition-colors"
+                                aria-label="Claim existing rows"
+                                title="Claim existing unmatched sheet rows"
+                              >
+                                Claim
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </section>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
 
-              <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                  <h2 className="text-white font-semibold">User-inputted: Completed</h2>
-                  <span className="text-xs text-gray-300">{userInputtedCompletedRows.length}</span>
-                </div>
-                <div className="p-3 text-sm">
-                  {userInputtedCompletedRows.length === 0 ? (
-                    <p className="text-gray-400">No completed user-inputted transactions yet.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {userInputtedCompletedRows.map((entry) => (
-                        <div
-                          key={entry.id}
-                          className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
-                        >
-                          <p className="text-gray-200 truncate">{entry.title}</p>
-                          <p className="text-xs text-gray-400 mt-0.5">
-                            {entry.source} • {entry.subtitle} • {fmtMoney(entry.amount)}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </section>
-            </div>
-
-            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
+            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">Statement Accounts: Suggested + Auto-matched</h2>
+                <h2 className="text-white font-semibold">Statement Accounts</h2>
                 <span className="text-xs text-gray-300">
-                  Suggested{" "}
                   {tabAccounts.reduce(
-                    (sum, account) => sum + (statementSuggestedRowsByAccount[account]?.length ?? 0),
+                    (sum, account) => sum + (statementReviewRowsByAccount[account]?.length ?? 0),
                     0,
                   )}{" "}
-                  • Matched{" "}
-                  {tabAccounts.reduce(
-                    (sum, account) => sum + (statementAutoMatchedRowsByAccount[account]?.length ?? 0),
-                    0,
-                  )}
+                  to reconcile
                 </span>
               </div>
               <div className="p-3 text-sm space-y-3">
                 {tabAccounts.map((account) => {
-                  const suggestedRows = statementSuggestedRowsByAccount[account] ?? [];
-                  const autoRows = statementAutoMatchedRowsByAccount[account] ?? [];
-                  const suggestedRemaining = suggestedRows.length > 3 ? suggestedRows.length - 3 : 0;
-                  const autoRemaining = autoRows.length > 3 ? autoRows.length - 3 : 0;
+                  const reviewRows = statementReviewRowsByAccount[account] ?? [];
                   const hasParser = accountHasConfiguredParser(account);
                   return (
                     <div
@@ -2144,121 +2218,12 @@ export default function ReconcilePage() {
                         </button>
                       </div>
                       <p className="text-xs text-gray-400 mt-1">
-                        Suggested: {suggestedRows.length} • Auto-matched: {autoRows.length}
+                        Unmatched / suggested: {reviewRows.length}
                       </p>
-                      {suggestedRows.length === 0 && autoRows.length === 0 && !hasParser && (
+                      {reviewRows.length === 0 && !hasParser && (
                         <p className="text-[11px] text-yellow-300/90 mt-1">
                           Statement CSV parser not configured yet for this account.
                         </p>
-                      )}
-                      {suggestedRows.length > 0 && (
-                        <div className="mt-2 space-y-1.5">
-                          <p className="text-[11px] uppercase tracking-wide text-yellow-300/90">
-                            Suggested
-                          </p>
-                          {suggestedRows.slice(0, 3).map((match, idx) => (
-                            <div
-                              key={`${idForTx(match.bankTransaction)}-${idx}`}
-                              className="grid gap-1.5 md:gap-2 md:grid-cols-2 rounded-md border border-charcoal-dark bg-charcoal/40 px-2 py-1.5 md:py-2"
-                            >
-                              <div className="min-w-0">
-                                <p className="text-[10px] uppercase tracking-wide text-gray-500">Bank</p>
-                                <p className="text-[11px] md:text-xs text-gray-300 truncate">
-                                  {match.bankTransaction.description || "—"}
-                                </p>
-                                <p className="text-[10px] md:text-[11px] text-gray-500">
-                                  {fmtDate(match.bankTransaction.date)} •{" "}
-                                  {fmtMoney(match.bankTransaction.amount)}
-                                </p>
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-[10px] uppercase tracking-wide text-gray-500">User-inputted</p>
-                                {match.matchedSheetExpense ? (
-                                  <>
-                                    <p className="text-[11px] md:text-xs text-yellow-300 truncate">
-                                      {match.matchedSheetExpense.description || "—"}
-                                    </p>
-                                    <p className="text-[10px] md:text-[11px] text-gray-500">
-                                      {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
-                                      {fmtDate(
-                                        match.matchedSheetExpense.timestamp ??
-                                          match.matchedSheetExpense.date,
-                                      )}{" "}
-                                      • {fmtMoney(match.matchedSheetExpense.amount)}
-                                    </p>
-                                  </>
-                                ) : match.matchedSheetTransfer ? (
-                                  <>
-                                    <p className="text-[11px] md:text-xs text-yellow-300 truncate">
-                                      {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
-                                      {(match.matchedSheetTransfer.transferTo ?? "—")}
-                                    </p>
-                                    <p className="text-[10px] md:text-[11px] text-gray-500">
-                                      Transfer •{" "}
-                                      {fmtDate(
-                                        match.matchedSheetTransfer.timestamp ??
-                                          match.matchedSheetTransfer.date,
-                                      )}{" "}
-                                      • {fmtMoney(match.matchedSheetTransfer.amount)}
-                                    </p>
-                                  </>
-                                ) : (
-                                  <p className="text-[11px] text-gray-500">No candidate match</p>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                          {suggestedRemaining > 0 && (
-                            <p className="text-[11px] text-gray-500">+{suggestedRemaining} more</p>
-                          )}
-                        </div>
-                      )}
-                      {autoRows.length > 0 && (
-                        <div className="mt-2 space-y-1.5">
-                          <p className="text-[11px] uppercase tracking-wide text-green-300/90">
-                            Auto-matched
-                          </p>
-                          {autoRows.slice(0, 3).map((match, idx) => (
-                            <div
-                              key={`${idForTx(match.bankTransaction)}-auto-${idx}`}
-                              className="grid gap-1.5 md:gap-2 md:grid-cols-2 rounded-md border border-charcoal-dark bg-charcoal/40 px-2 py-1.5 md:py-2"
-                            >
-                              <div className="min-w-0">
-                                <p className="text-[10px] uppercase tracking-wide text-gray-500">Bank</p>
-                                <p className="text-[11px] md:text-xs text-gray-300 truncate">
-                                  {match.bankTransaction.description || "—"}
-                                </p>
-                                <p className="text-[10px] md:text-[11px] text-gray-500">
-                                  {fmtDate(match.bankTransaction.date)} •{" "}
-                                  {fmtMoney(match.bankTransaction.amount)}
-                                </p>
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-[10px] uppercase tracking-wide text-gray-500">User-inputted</p>
-                                {match.matchedSheetExpense ? (
-                                  <>
-                                    <p className="text-[11px] md:text-xs text-green-300 truncate">
-                                      {match.matchedSheetExpense.description || "—"}
-                                    </p>
-                                    <p className="text-[10px] md:text-[11px] text-gray-500">
-                                      {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
-                                      {fmtDate(
-                                        match.matchedSheetExpense.timestamp ??
-                                          match.matchedSheetExpense.date,
-                                      )}{" "}
-                                      • {fmtMoney(match.matchedSheetExpense.amount)}
-                                    </p>
-                                  </>
-                                ) : (
-                                  <p className="text-[11px] text-gray-500">No linked entry</p>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                          {autoRemaining > 0 && (
-                            <p className="text-[11px] text-gray-500">+{autoRemaining} more</p>
-                          )}
-                        </div>
                       )}
                     </div>
                   );
@@ -2420,16 +2385,12 @@ export default function ReconcilePage() {
                       const tx = match.bankTransaction;
                       const rowId = idForTx(tx);
                       const dismissalNote = dismissalNotesById[rowId];
-                      const link = buildSheetLink(match.matchedSheetIndex);
-                      const hasLinkedEntry = Boolean(
-                        match.matchedSheetExpense || match.matchedSheetTransfer,
-                      );
                       return (
                         <div
                           key={`${rowId}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
+                          <div className="grid gap-3 md:grid-cols-2 items-start">
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 Bank Transaction
@@ -2440,93 +2401,43 @@ export default function ReconcilePage() {
                               </p>
                             </div>
                             <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                User-inputted Entry
+                              </p>
                               {dismissalNote ? (
+                                <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                                  Dismissed: {dismissalNote}
+                                </p>
+                              ) : match.matchedSheetExpense ? (
                                 <>
-                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                    Statement line (not sheet)
+                                  <p className="text-green-300 text-sm truncate">
+                                    {match.matchedSheetExpense.description || "—"}
                                   </p>
-                                  <p className="text-gray-200 text-sm whitespace-pre-wrap break-words">
-                                    {tx.description || "—"}
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetExpense.amount)}
                                   </p>
-                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mt-2 mb-1">
-                                    Your note
+                                </>
+                              ) : match.matchedSheetTransfer ? (
+                                <>
+                                  <p className="text-green-300 text-sm truncate">
+                                    {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
+                                    {(match.matchedSheetTransfer.transferTo ?? "—")}
                                   </p>
-                                  <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
-                                    {dismissalNote}
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    Transfer •{" "}
+                                    {fmtDate(
+                                      match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
+                                    )}{" "}
+                                    • {fmtMoney(match.matchedSheetTransfer.amount)}
                                   </p>
                                 </>
                               ) : (
-                                <>
-                                  <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-                                    User-inputted Entry
-                                  </p>
-                                  {match.matchedSheetExpense ? (
-                                    <>
-                                      <p className="text-green-300 text-sm truncate">
-                                        {match.matchedSheetExpense.description || "—"}
-                                      </p>
-                                      <p className="text-xs text-gray-400 mt-0.5">
-                                        {(match.matchedSheetExpense.expenseType ?? "—")} •{" "}
-                                        {fmtDate(
-                                          match.matchedSheetExpense.timestamp ?? match.matchedSheetExpense.date,
-                                        )}{" "}
-                                        • {fmtMoney(match.matchedSheetExpense.amount)}
-                                        {match.matchedSheetExpense.account
-                                          ? ` • ${match.matchedSheetExpense.account}`
-                                          : ""}
-                                      </p>
-                                    </>
-                                  ) : match.matchedSheetTransfer ? (
-                                    <>
-                                      <p className="text-green-300 text-sm truncate">
-                                        {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
-                                        {(match.matchedSheetTransfer.transferTo ?? "—")}
-                                      </p>
-                                      <p className="text-xs text-gray-400 mt-0.5">
-                                        Transfer •{" "}
-                                        {fmtDate(
-                                          match.matchedSheetTransfer.timestamp ?? match.matchedSheetTransfer.date,
-                                        )}{" "}
-                                        • {fmtMoney(match.matchedSheetTransfer.amount)}
-                                      </p>
-                                    </>
-                                  ) : (
-                                    <p className="text-xs text-gray-500">No linked user-inputted entry</p>
-                                  )}
-                                </>
+                                <p className="text-xs text-gray-500">Processed</p>
                               )}
-                            </div>
-                            <div className="text-right shrink-0">
-                              <div
-                                className={`text-xs font-medium ${
-                                  dismissalNote ? "text-amber-200/90" : "text-green-300"
-                                }`}
-                              >
-                                {dismissalNote ? "Dismissed" : hasLinkedEntry ? "Matched" : "Processed"}
-                                {!dismissalNote && hasLinkedEntry && link ? (
-                                  <Link href={link} target="_blank" className="ml-2 underline text-blue-300">
-                                    Sheet entry
-                                  </Link>
-                                ) : !dismissalNote && hasLinkedEntry ? (
-                                  <Link href="/budget" className="ml-2 underline text-blue-300">
-                                    Budget entry
-                                  </Link>
-                                ) : null}
-                                {!dismissalNote && !hasLinkedEntry ? (
-                                  <span className="ml-2 text-gray-400">No linked entry</span>
-                                ) : null}
-                              </div>
-                              <div className="mt-2 flex justify-end">
-                                <button
-                                  type="button"
-                                  onClick={() => handleDisconnect(match)}
-                                  disabled={processingId === rowId}
-                                  className="px-2 py-1 rounded-md text-[11px] text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-60"
-                                  title="Disconnect match and allow rematch"
-                                >
-                                  Disconnect
-                                </button>
-                              </div>
                             </div>
                           </div>
                         </div>
@@ -2537,10 +2448,10 @@ export default function ReconcilePage() {
               </div>
             </section>
 
-            {accountDetailRows.length > 0 && (
+            {activeReviewRows.length > 0 && (
               <p className="text-xs text-gray-500">
-                Showing {activeReviewRows.length} unmatched/suggested and {activeMatchedRows.length} matched rows
-                for {activeTab}.
+                Showing {activeReviewRows.length} unmatched/suggested row
+                {activeReviewRows.length === 1 ? "" : "s"} for {activeTab}.
               </p>
             )}
           </>
