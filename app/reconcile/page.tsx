@@ -1819,9 +1819,222 @@ export default function ReconcilePage() {
   }, [persistProcessedHash]);
 
   const handleApprove = useCallback(
-    async (match: MatchResult) => {
+    async (match: MatchResult, userEntry?: UserInputtedEntry) => {
       const tx = match.bankTransaction;
       const id = idForTx(tx);
+      const bankAbs = Math.abs(tx.amount);
+      const bankCents = toCents(bankAbs);
+
+      if (userEntry) {
+        if (userEntry.source === "Expenses") {
+          const expenseRowIdFromEntry = parseExpenseRowIdFromEntryId(userEntry.id);
+          if (!expenseRowIdFromEntry) {
+            setActionError("This expense row is missing a Row ID. Use Claim to choose a sheet row.");
+            return;
+          }
+          if (toCents(Math.abs(userEntry.amount)) !== bankCents) {
+            setActionError("User-inputted amount does not match this bank line; use Claim.");
+            return;
+          }
+          setActionError("");
+          setProcessingId(id);
+          try {
+            const res = await fetch("/api/reconciliation/claims", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                bankTransaction: {
+                  hash: tx.hash,
+                  accountName: tx.accountName,
+                  amount: tx.amount,
+                  date: tx.date,
+                  description: tx.description,
+                },
+                links: [
+                  {
+                    sheetName: "Expenses",
+                    sheetRowId: expenseRowIdFromEntry,
+                    amount: bankAbs,
+                  },
+                ],
+              }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ error: res.statusText }));
+              throw new Error(err.error || `Failed to save sheet link (${res.status})`);
+            }
+            await persistProcessedHash(tx);
+            setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+            setClaimedRowKeys((prev) => {
+              const next = new Set(prev);
+              next.add(claimKey("Expenses", expenseRowIdFromEntry));
+              return next;
+            });
+            setMatchesByAccount((prev) => {
+              const next: Record<string, MatchResult[]> = {};
+              for (const [account, rows] of Object.entries(prev)) {
+                next[account] = rows.map((row) => {
+                  if (idForTx(row.bankTransaction) !== id) return row;
+                  const exp = sheetExpenses.find((e) => (e.rowId ?? "").trim() === expenseRowIdFromEntry);
+                  return {
+                    ...row,
+                    matchType: "exact_match",
+                    reason: "Linked user-inputted expense row and marked processed.",
+                    matchedSheetExpense: exp
+                      ? {
+                          amount: Math.abs(Number(exp.amount)),
+                          timestamp: exp.timestamp ?? tx.date,
+                          description: exp.description ?? "",
+                          expenseType: exp.expenseType ?? "—",
+                          account: exp.account ?? tx.accountName,
+                          rowId: exp.rowId,
+                          date: exp.date,
+                        }
+                      : {
+                          amount: Math.abs(userEntry.amount),
+                          timestamp: userEntry.dateValue || tx.date,
+                          description: userEntry.title,
+                          expenseType: "—",
+                          account: tx.accountName,
+                          rowId: expenseRowIdFromEntry,
+                          date: userEntry.dateValue || tx.date,
+                        },
+                    matchedSheetIndex: undefined,
+                    matchedSheetTransfer: undefined,
+                    matchedSheetTransferIndex: undefined,
+                  };
+                });
+              }
+              return next;
+            });
+            setDisconnectedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            void refreshBankHashesWithNeonClaim();
+          } catch (err) {
+            setActionError(err instanceof Error ? err.message : "Failed to approve and link.");
+          } finally {
+            setProcessingId(null);
+          }
+          return;
+        }
+
+        const transferRowIdFromEntry = parseTransferRowIdFromEntryId(userEntry.id);
+        if (!transferRowIdFromEntry) {
+          setActionError("This transfer row is missing a Transfer Row ID. Use Claim to choose a sheet row.");
+          return;
+        }
+        if (toCents(Math.abs(userEntry.amount)) !== bankCents) {
+          setActionError("User-inputted amount does not match this bank line; use Claim.");
+          return;
+        }
+        setActionError("");
+        setProcessingId(id);
+        try {
+          const res = await fetch("/api/reconciliation/claims", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              bankTransaction: {
+                hash: tx.hash,
+                accountName: tx.accountName,
+                amount: tx.amount,
+                date: tx.date,
+                description: tx.description,
+              },
+              links: [
+                {
+                  sheetName: "Transfers",
+                  sheetRowId: transferRowIdFromEntry,
+                  amount: bankAbs,
+                },
+              ],
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: res.statusText }));
+            throw new Error(err.error || `Failed to save transfer link (${res.status})`);
+          }
+          const tRes = await fetch("/api/reconciliation/transfer-claims", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              transferRowId: transferRowIdFromEntry,
+              expectedLegs: 2,
+              bankTransaction: {
+                hash: tx.hash,
+                accountName: tx.accountName,
+                amount: tx.amount,
+              },
+            }),
+          });
+          if (!tRes.ok) {
+            const err = await tRes.json().catch(() => ({ error: res.statusText }));
+            throw new Error(err.error || `Saved link but transfer tracking failed (${tRes.status}).`);
+          }
+          const tClaimsGet = await fetch("/api/reconciliation/transfer-claims", { cache: "no-store" });
+          if (tClaimsGet.ok) {
+            const transferClaimsData = (await tClaimsGet.json()) as {
+              statusByRowId?: TransferClaimStatusByRowId;
+            };
+            setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+          }
+          await persistProcessedHash(tx);
+          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+          setClaimedRowKeys((prev) => {
+            const next = new Set(prev);
+            next.add(claimKey("Transfers", transferRowIdFromEntry));
+            return next;
+          });
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [account, rows] of Object.entries(prev)) {
+              next[account] = rows.map((row) => {
+                if (idForTx(row.bankTransaction) !== id) return row;
+                const tr = sheetTransfers.find(
+                  (t) => (t.transferRowId ?? "").trim() === transferRowIdFromEntry,
+                );
+                const amountSignedForTransfer = tr
+                  ? tx.amount < 0
+                    ? -Math.abs(Number(tr.amount ?? 0))
+                    : Math.abs(Number(tr.amount ?? 0))
+                  : tx.amount;
+                return {
+                  ...row,
+                  matchType: "exact_match",
+                  reason: "Linked user-inputted transfer row and marked processed.",
+                  matchedSheetTransfer: {
+                    amount: amountSignedForTransfer,
+                    transferRowId: transferRowIdFromEntry,
+                    transferFrom: tr?.transferFrom ?? userEntry.transferFrom ?? "—",
+                    transferTo: tr?.transferTo ?? userEntry.transferTo ?? "—",
+                    timestamp: tr?.timestamp ?? userEntry.dateValue ?? tx.date,
+                    date: tr?.date ?? userEntry.dateValue ?? tx.date,
+                  },
+                  matchedSheetTransferIndex: undefined,
+                  matchedSheetExpense: undefined,
+                  matchedSheetIndex: undefined,
+                };
+              });
+            }
+            return next;
+          });
+          setDisconnectedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+          void refreshBankHashesWithNeonClaim();
+        } catch (err) {
+          setActionError(err instanceof Error ? err.message : "Failed to approve transfer.");
+        } finally {
+          setProcessingId(null);
+        }
+        return;
+      }
+
       const transferRowId = String(match.matchedSheetTransfer?.transferRowId ?? "").trim();
       if (
         match.matchedSheetTransfer &&
@@ -1831,10 +2044,7 @@ export default function ReconcilePage() {
         openTransferClaimModal(match);
         return;
       }
-
       const expenseRowId = String(match.matchedSheetExpense?.rowId ?? "").trim();
-      const bankAbs = Math.abs(tx.amount);
-      const bankCents = toCents(bankAbs);
 
       if (match.matchedSheetExpense && expenseRowId) {
         const expCents = toCents(Math.abs(Number(match.matchedSheetExpense.amount ?? 0)));
@@ -3120,7 +3330,7 @@ export default function ReconcilePage() {
                             <div className="shrink-0 flex items-center gap-1">
                               <button
                                 type="button"
-                                onClick={() => match && handleApprove(match)}
+                                onClick={() => match && handleApprove(match, entry)}
                                 disabled={!match || processingId === id}
                                 className="p-1.5 rounded-md text-green-300 hover:text-green-200 hover:bg-green-500/10 disabled:opacity-60 transition-colors"
                                 aria-label={isTransferCandidate ? "Claim transfer leg" : "Approve match"}
