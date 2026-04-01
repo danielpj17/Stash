@@ -284,6 +284,22 @@ function hasLinkedUserInputtedEntry(match: MatchResult): boolean {
   return Boolean(match.matchedSheetExpense || match.matchedSheetTransfer);
 }
 
+/** Processed in Neon but no row in claim tables — should show in review, not "closed without sheet". */
+function isProcessedWithoutNeonClaim(
+  match: MatchResult,
+  processedHashes: Set<string>,
+  dismissalNotesById: Record<string, string>,
+  bankHashesWithNeonClaim: Set<string>,
+): boolean {
+  const id = idForTx(match.bankTransaction);
+  const hash = match.bankTransaction.hash;
+  return (
+    processedHashes.has(hash) &&
+    !dismissalNotesById[id] &&
+    !bankHashesWithNeonClaim.has(hash)
+  );
+}
+
 function accountHasConfiguredParser(account: string): boolean {
   return CSV_PARSER_READY_ACCOUNTS.has(account as AccountOption);
 }
@@ -459,6 +475,8 @@ export default function ReconcilePage() {
   const [sheetTransfers, setSheetTransfers] = useState<TransferRow[]>([]);
   const [uploadedFilesByAccount, setUploadedFilesByAccount] = useState<Record<string, string[]>>({});
   const [claimedRowKeys, setClaimedRowKeys] = useState<Set<string>>(new Set());
+  /** Bank tx hashes that have a row in reconciliation_claim_links or reconciliation_transfer_claim_links. */
+  const [bankHashesWithNeonClaim, setBankHashesWithNeonClaim] = useState<Set<string>>(new Set());
   const [transferClaimStatusByRowId, setTransferClaimStatusByRowId] =
     useState<TransferClaimStatusByRowId>({});
   /** Merged raw CSV rows per account — used to re-run /match for every account after a transfer leg claim. */
@@ -531,6 +549,31 @@ export default function ReconcilePage() {
     submitting: false,
     error: "",
   });
+
+  const refreshBankHashesWithNeonClaim = useCallback(async () => {
+    try {
+      const [claimsRes, transferRes] = await Promise.all([
+        fetch("/api/reconciliation/claims", { cache: "no-store" }),
+        fetch("/api/reconciliation/transfer-claims", { cache: "no-store" }),
+      ]);
+      const next = new Set<string>();
+      if (claimsRes.ok) {
+        const data = (await claimsRes.json()) as { claims?: Array<{ bankHash?: string }> };
+        for (const c of data.claims ?? []) {
+          if (c.bankHash) next.add(String(c.bankHash));
+        }
+      }
+      if (transferRes.ok) {
+        const data = (await transferRes.json()) as { claims?: Array<{ bankHash?: string }> };
+        for (const c of data.claims ?? []) {
+          if (c.bankHash) next.add(String(c.bankHash));
+        }
+      }
+      setBankHashesWithNeonClaim(next);
+    } catch {
+      // Non-fatal; reopen-review logic may be conservative until next refresh.
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -708,15 +751,27 @@ export default function ReconcilePage() {
         ]);
         if (!claimsRes.ok || !transferClaimsRes.ok) return;
 
-        const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+        const claimsData = (await claimsRes.json()) as {
+          claimedRowIds?: string[];
+          claims?: Array<{ bankHash?: string }>;
+        };
         const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
         const transferClaimsData = (await transferClaimsRes.json()) as {
           statusByRowId?: TransferClaimStatusByRowId;
+          claims?: Array<{ bankHash?: string }>;
         };
+        const bankHashSet = new Set<string>();
+        for (const c of claimsData.claims ?? []) {
+          if (c.bankHash) bankHashSet.add(String(c.bankHash));
+        }
+        for (const c of transferClaimsData.claims ?? []) {
+          if (c.bankHash) bankHashSet.add(String(c.bankHash));
+        }
         if (cancelled) return;
         setSheetExpenses(rows);
         setSheetTransfers(transfers);
         setClaimedRowKeys(claimedRows);
+        setBankHashesWithNeonClaim(bankHashSet);
         setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
       } catch {
         // Home view still works with partial/no user-inputted reconciliation data.
@@ -764,12 +819,31 @@ export default function ReconcilePage() {
     tabAccounts.forEach((account) => {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
-        if (processedHashes.has(match.bankTransaction.hash)) return false;
-        return isStatementManualReview(match) || disconnectedIds.has(id);
+        const hash = match.bankTransaction.hash;
+        if (disconnectedIds.has(id)) return true;
+        if (
+          isProcessedWithoutNeonClaim(
+            match,
+            processedHashes,
+            dismissalNotesById,
+            bankHashesWithNeonClaim,
+          )
+        ) {
+          return true;
+        }
+        if (processedHashes.has(hash)) return false;
+        return isStatementManualReview(match);
       });
     });
     return byAccount;
-  }, [processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [
+    bankHashesWithNeonClaim,
+    disconnectedIds,
+    dismissalNotesById,
+    processedHashes,
+    statementRowsByAccount,
+    tabAccounts,
+  ]);
 
   const statementCompletedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
@@ -777,6 +851,16 @@ export default function ReconcilePage() {
       byAccount[account] = statementRowsByAccount[account].filter((match) => {
         const id = idForTx(match.bankTransaction);
         if (disconnectedIds.has(id)) return false;
+        if (
+          isProcessedWithoutNeonClaim(
+            match,
+            processedHashes,
+            dismissalNotesById,
+            bankHashesWithNeonClaim,
+          )
+        ) {
+          return false;
+        }
         if (!processedHashes.has(match.bankTransaction.hash)) return false;
         const dismissed = Boolean(dismissalNotesById[id]);
         const completedWithoutExactSheet =
@@ -785,7 +869,14 @@ export default function ReconcilePage() {
       });
     });
     return byAccount;
-  }, [dismissalNotesById, processedHashes, disconnectedIds, statementRowsByAccount, tabAccounts]);
+  }, [
+    bankHashesWithNeonClaim,
+    dismissalNotesById,
+    processedHashes,
+    disconnectedIds,
+    statementRowsByAccount,
+    tabAccounts,
+  ]);
 
   const statementAutoMatchedRowsByAccount = useMemo(() => {
     const byAccount: Record<string, MatchResult[]> = {};
@@ -1156,12 +1247,16 @@ export default function ReconcilePage() {
         const err = await claimsRes.json().catch(() => ({ error: claimsRes.statusText }));
         throw new Error(err.error || "Failed to load claimed sheet rows.");
       }
-      const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+      const claimsData = (await claimsRes.json()) as {
+        claimedRowIds?: string[];
+        claims?: Array<{ bankHash?: string }>;
+      };
       const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
 
       setSheetExpenses(freshSheetRows);
       setSheetTransfers(freshTransfers);
       setClaimedRowKeys(claimedRows);
+      void refreshBankHashesWithNeonClaim();
 
       const expenseCandidates: SplitDraftLine[] = freshSheetRows
         .filter((row) => {
@@ -1227,7 +1322,7 @@ export default function ReconcilePage() {
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to open claim modal.");
     }
-  }, []);
+  }, [refreshBankHashesWithNeonClaim]);
 
   const closeSplitModal = useCallback(() => {
     setSplitModal({
@@ -1560,6 +1655,7 @@ export default function ReconcilePage() {
         next.delete(bankRowId);
         return next;
       });
+      void refreshBankHashesWithNeonClaim();
       closeUserStatementClaimModal();
     } catch (err) {
       setUserStatementClaimModal((prev) => ({
@@ -1572,6 +1668,7 @@ export default function ReconcilePage() {
     allMatches,
     closeUserStatementClaimModal,
     persistProcessedHash,
+    refreshBankHashesWithNeonClaim,
     sheetExpenses,
     sheetTransfers,
     userStatementClaimModal,
@@ -1642,14 +1739,26 @@ export default function ReconcilePage() {
       userNoteMap[claimKey(d.sheetName, d.sheetRowId)] = d.note;
     }
     setUserDismissalNotesByEntryId(userNoteMap);
-    const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+    const claimsData = (await claimsRes.json()) as {
+      claimedRowIds?: string[];
+      claims?: Array<{ bankHash?: string }>;
+    };
     const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
     const transferClaimsData = (await transferClaimsRes.json()) as {
       statusByRowId?: TransferClaimStatusByRowId;
+      claims?: Array<{ bankHash?: string }>;
     };
+    const bankHashSetRematch = new Set<string>();
+    for (const c of claimsData.claims ?? []) {
+      if (c.bankHash) bankHashSetRematch.add(String(c.bankHash));
+    }
+    for (const c of transferClaimsData.claims ?? []) {
+      if (c.bankHash) bankHashSetRematch.add(String(c.bankHash));
+    }
     setSheetExpenses(sheetRows);
     setSheetTransfers(sheetTransfers);
     setClaimedRowKeys(claimedRows);
+    setBankHashesWithNeonClaim(bankHashSetRematch);
     setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
 
     const nextMatches: Record<string, MatchResult[]> = {};
@@ -1799,6 +1908,7 @@ export default function ReconcilePage() {
             next.delete(id);
             return next;
           });
+          void refreshBankHashesWithNeonClaim();
         } catch (err) {
           setActionError(err instanceof Error ? err.message : "Failed to approve and link.");
         } finally {
@@ -1899,6 +2009,7 @@ export default function ReconcilePage() {
             next.delete(id);
             return next;
           });
+          void refreshBankHashesWithNeonClaim();
         } catch (err) {
           setActionError(err instanceof Error ? err.message : "Failed to approve transfer.");
         } finally {
@@ -1923,7 +2034,7 @@ export default function ReconcilePage() {
         setProcessingId(null);
       }
     },
-    [openTransferClaimModal, persistProcessedHash, sheetExpenses, sheetTransfers],
+    [openTransferClaimModal, persistProcessedHash, refreshBankHashesWithNeonClaim, sheetExpenses, sheetTransfers],
   );
 
   const handleDisconnectSheetLink = useCallback(
@@ -1991,6 +2102,8 @@ export default function ReconcilePage() {
           setTransferClaimStatusByRowId(data.statusByRowId ?? {});
         }
 
+        void refreshBankHashesWithNeonClaim();
+
         const hadStoredCsv = Object.keys(statementCsvRowsByAccountRef.current).length > 0;
         const patchDisconnectedRow = () => {
           setMatchesByAccount((prev) => {
@@ -2030,7 +2143,7 @@ export default function ReconcilePage() {
         setProcessingId(null);
       }
     },
-    [rematchAllStoredAccounts],
+    [refreshBankHashesWithNeonClaim, rematchAllStoredAccounts],
   );
 
   const openDismissModal = useCallback((match: MatchResult) => {
@@ -2177,6 +2290,7 @@ export default function ReconcilePage() {
       setUserDismissalNotesByEntryId({});
       setDisconnectedIds(new Set());
       setClaimedRowKeys(new Set());
+      setBankHashesWithNeonClaim(new Set());
       setTransferClaimStatusByRowId({});
       setUploadedFilesByAccount({});
       setActionError("");
@@ -2480,6 +2594,7 @@ export default function ReconcilePage() {
         next.delete(splitModal.rowId as string);
         return next;
       });
+      void refreshBankHashesWithNeonClaim();
       closeSplitModal();
     } catch (err) {
       setSplitModal((prev) => ({
@@ -2488,7 +2603,15 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to claim selected rows.",
       }));
     }
-  }, [allMatches, closeSplitModal, splitModal.rowId, splitModal.transferExpectedLegs, splitModal.selectedKeys, splitModal.candidates]);
+  }, [
+    allMatches,
+    closeSplitModal,
+    refreshBankHashesWithNeonClaim,
+    splitModal.rowId,
+    splitModal.transferExpectedLegs,
+    splitModal.selectedKeys,
+    splitModal.candidates,
+  ]);
 
   const handleTransferClaimSubmit = useCallback(async () => {
     if (!transferClaimModal.rowId) return;
@@ -2654,14 +2777,26 @@ export default function ReconcilePage() {
           userNoteMap[claimKey(d.sheetName, d.sheetRowId)] = d.note;
         }
         setUserDismissalNotesByEntryId(userNoteMap);
-        const claimsData = (await claimsRes.json()) as { claimedRowIds?: string[] };
+        const claimsData = (await claimsRes.json()) as {
+          claimedRowIds?: string[];
+          claims?: Array<{ bankHash?: string }>;
+        };
         const claimedRows = new Set((claimsData.claimedRowIds ?? []).map((id) => String(id)));
         const transferClaimsData = (await transferClaimsRes.json()) as {
           statusByRowId?: TransferClaimStatusByRowId;
+          claims?: Array<{ bankHash?: string }>;
         };
+        const bankHashSetUpload = new Set<string>();
+        for (const c of claimsData.claims ?? []) {
+          if (c.bankHash) bankHashSetUpload.add(String(c.bankHash));
+        }
+        for (const c of transferClaimsData.claims ?? []) {
+          if (c.bankHash) bankHashSetUpload.add(String(c.bankHash));
+        }
         setSheetExpenses(sheetRows);
         setSheetTransfers(sheetTransfers);
         setClaimedRowKeys(claimedRows);
+        setBankHashesWithNeonClaim(bankHashSetUpload);
         setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
 
         const res = await fetch("/api/reconciliation/match", {
@@ -3160,10 +3295,9 @@ export default function ReconcilePage() {
                 </div>
                 <div className="p-3 text-sm">
                   <p className="text-xs text-gray-500 mb-3">
-                    Processed or dismissed on the bank side only—no expense/transfer row attached in the matcher. To
-                    account for them: add or fix the row in Google Sheets, refresh matches for that account, then use{" "}
-                    <span className="text-gray-400">Claim</span> on the home list (or Claim from an unmatched
-                    statement row).
+                    Dismissed notes, or processed on the bank side with a Neon processed hash but no claim link
+                    (legacy checkmark). Use{" "}
+                    <span className="text-gray-400">Unmark</span> to clear processed and reopen the line for matching.
                   </p>
                   {homeFilteredStatementClosedRows.length === 0 ? (
                     <p className="text-gray-400">No rows match your search or account filter.</p>
@@ -3178,7 +3312,7 @@ export default function ReconcilePage() {
                             key={`closed-${rowId}-${index}`}
                             className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                           >
-                            <div className="grid gap-3 md:grid-cols-2 items-start">
+                            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                               <div className="min-w-0">
                                 <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                   Statement status
@@ -3201,6 +3335,22 @@ export default function ReconcilePage() {
                                 <p className="text-xs text-gray-400 mt-0.5">
                                   {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                                 </p>
+                              </div>
+                              <div className="shrink-0 flex items-start pt-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDisconnectSheetLink(match)}
+                                  disabled={processingId === rowId}
+                                  className="p-1.5 rounded-md text-orange-300/90 hover:text-orange-200 hover:bg-orange-500/10 disabled:opacity-60 transition-colors"
+                                  title="Unmark processed, remove any claim link, reopen for matching"
+                                  aria-label="Unmark processed and reopen"
+                                >
+                                  {processingId === rowId ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Link2Off className="w-4 h-4" />
+                                  )}
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -3563,8 +3713,8 @@ export default function ReconcilePage() {
                 </div>
                 <div className="p-3 text-sm">
                   <p className="text-xs text-gray-500 mb-3">
-                    Processed or dismissed here without a linked expense/transfer row. Add or fix the sheet row and
-                    refresh matches, or use Claim where amounts match.
+                    Dismissals or legacy processed-without-claim lines. Use{" "}
+                    <span className="text-gray-400">Unmark</span> to clear processed and reopen for matching.
                   </p>
                   <div className="space-y-2">
                     {activeStatementClosedOnlyRows.map((match, index) => {
@@ -3576,7 +3726,7 @@ export default function ReconcilePage() {
                           key={`acct-closed-${rowId}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="grid gap-3 md:grid-cols-2 items-start">
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 Bank Transaction
@@ -3599,6 +3749,22 @@ export default function ReconcilePage() {
                                   Processed on statement only — no linked sheet row.
                                 </p>
                               )}
+                            </div>
+                            <div className="shrink-0 flex items-start pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => void handleDisconnectSheetLink(match)}
+                                disabled={processingId === rowId}
+                                className="p-1.5 rounded-md text-orange-300/90 hover:text-orange-200 hover:bg-orange-500/10 disabled:opacity-60 transition-colors"
+                                title="Unmark processed, remove any claim link, reopen for matching"
+                                aria-label="Unmark processed and reopen"
+                              >
+                                {processingId === rowId ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Link2Off className="w-4 h-4" />
+                                )}
+                              </button>
                             </div>
                           </div>
                         </div>
