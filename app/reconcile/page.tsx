@@ -3,7 +3,7 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
-import { Ban, Check, Filter, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
+import { Ban, Check, Filter, Link2Off, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   getExpenses,
@@ -980,8 +980,19 @@ export default function ReconcilePage() {
     return sortByNewestDate(list, (m) => m.bankTransaction.date);
   }, [statementAutoMatchedRowsByAccount, statementCompletedRowsByAccount, tabAccounts]);
 
+  /** Real sheet ↔ bank pairs only (excludes “approve checkmark” / dismiss with no expense or transfer row). */
+  const allHomeUserLinkedMatchedMatches = useMemo(
+    () => allHomeMatchedMatches.filter((m) => hasLinkedUserInputtedEntry(m)),
+    [allHomeMatchedMatches],
+  );
+
+  const allHomeStatementClosedOnlyMatches = useMemo(
+    () => allHomeMatchedMatches.filter((m) => !hasLinkedUserInputtedEntry(m)),
+    [allHomeMatchedMatches],
+  );
+
   const homeFilteredMatchedRows = useMemo(() => {
-    let rows = allHomeMatchedMatches;
+    let rows = allHomeUserLinkedMatchedMatches;
     const q = normalizeText(homeSearchQuery);
     if (q) {
       rows = rows.filter((match) => {
@@ -1017,7 +1028,39 @@ export default function ReconcilePage() {
       });
     }
     return rows;
-  }, [allHomeMatchedMatches, homeAccountFilter, homeSearchQuery]);
+  }, [allHomeUserLinkedMatchedMatches, homeAccountFilter, homeSearchQuery]);
+
+  const homeFilteredStatementClosedRows = useMemo(() => {
+    let rows = allHomeStatementClosedOnlyMatches;
+    const q = normalizeText(homeSearchQuery);
+    if (q) {
+      rows = rows.filter((match) => {
+        const tx = match.bankTransaction;
+        const tid = idForTx(tx);
+        const note = dismissalNotesById[tid];
+        const hay = [
+          tx.description,
+          tx.accountName,
+          tx.date,
+          note,
+          match.matchType,
+          match.reason,
+        ]
+          .map((v) => normalizeText(v))
+          .join(" ");
+        return hay.includes(q);
+      });
+    }
+    if (homeAccountFilter !== ALL_ACCOUNTS_OPTION) {
+      rows = rows.filter((match) => match.bankTransaction.accountName === homeAccountFilter);
+    }
+    return rows;
+  }, [
+    allHomeStatementClosedOnlyMatches,
+    dismissalNotesById,
+    homeAccountFilter,
+    homeSearchQuery,
+  ]);
 
   const homeFilteredUserDismissedRows = useMemo(() => {
     let rows = userInputtedEntries.filter((e) => userDismissedRowKeys.has(e.id));
@@ -1680,6 +1723,190 @@ export default function ReconcilePage() {
         return;
       }
 
+      const expenseRowId = String(match.matchedSheetExpense?.rowId ?? "").trim();
+      const bankAbs = Math.abs(tx.amount);
+      const bankCents = toCents(bankAbs);
+
+      if (match.matchedSheetExpense && expenseRowId) {
+        const expCents = toCents(Math.abs(Number(match.matchedSheetExpense.amount ?? 0)));
+        if (expCents !== bankCents) {
+          setActionError("Sheet amount does not match this bank line; use Claim to pick a different row.");
+          return;
+        }
+        setActionError("");
+        setProcessingId(id);
+        try {
+          const res = await fetch("/api/reconciliation/claims", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              bankTransaction: {
+                hash: tx.hash,
+                accountName: tx.accountName,
+                amount: tx.amount,
+                date: tx.date,
+                description: tx.description,
+              },
+              links: [
+                {
+                  sheetName: "Expenses",
+                  sheetRowId: expenseRowId,
+                  amount: bankAbs,
+                },
+              ],
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: res.statusText }));
+            throw new Error(err.error || `Failed to save sheet link (${res.status})`);
+          }
+          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+          setClaimedRowKeys((prev) => {
+            const next = new Set(prev);
+            next.add(claimKey("Expenses", expenseRowId));
+            return next;
+          });
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [account, rows] of Object.entries(prev)) {
+              next[account] = rows.map((row) => {
+                if (idForTx(row.bankTransaction) !== id) return row;
+                const exp = sheetExpenses.find((e) => (e.rowId ?? "").trim() === expenseRowId);
+                if (!exp) return row;
+                return {
+                  ...row,
+                  matchType: "exact_match",
+                  reason: "Linked sheet row and marked processed.",
+                  matchedSheetExpense: {
+                    amount: Math.abs(Number(exp.amount)),
+                    timestamp: exp.timestamp ?? tx.date,
+                    description: exp.description ?? "",
+                    expenseType: exp.expenseType ?? "—",
+                    account: exp.account ?? tx.accountName,
+                    rowId: exp.rowId,
+                    date: exp.date,
+                  },
+                  matchedSheetIndex: undefined,
+                  matchedSheetTransfer: undefined,
+                  matchedSheetTransferIndex: undefined,
+                };
+              });
+            }
+            return next;
+          });
+          setDisconnectedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        } catch (err) {
+          setActionError(err instanceof Error ? err.message : "Failed to approve and link.");
+        } finally {
+          setProcessingId(null);
+        }
+        return;
+      }
+
+      if (match.matchedSheetTransfer && transferRowId && match.matchType === "exact_match") {
+        setActionError("");
+        setProcessingId(id);
+        try {
+          const res = await fetch("/api/reconciliation/claims", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              bankTransaction: {
+                hash: tx.hash,
+                accountName: tx.accountName,
+                amount: tx.amount,
+                date: tx.date,
+                description: tx.description,
+              },
+              links: [
+                {
+                  sheetName: "Transfers",
+                  sheetRowId: transferRowId,
+                  amount: bankAbs,
+                },
+              ],
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: res.statusText }));
+            throw new Error(err.error || `Failed to save transfer link (${res.status})`);
+          }
+          const tRes = await fetch("/api/reconciliation/transfer-claims", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              transferRowId,
+              expectedLegs: 2,
+              bankTransaction: {
+                hash: tx.hash,
+                accountName: tx.accountName,
+                amount: tx.amount,
+              },
+            }),
+          });
+          if (!tRes.ok) {
+            const err = await tRes.json().catch(() => ({ error: res.statusText }));
+            throw new Error(err.error || `Saved link but transfer tracking failed (${tRes.status}).`);
+          }
+          const tClaimsGet = await fetch("/api/reconciliation/transfer-claims", { cache: "no-store" });
+          if (tClaimsGet.ok) {
+            const transferClaimsData = (await tClaimsGet.json()) as {
+              statusByRowId?: TransferClaimStatusByRowId;
+            };
+            setTransferClaimStatusByRowId(transferClaimsData.statusByRowId ?? {});
+          }
+          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+          setClaimedRowKeys((prev) => {
+            const next = new Set(prev);
+            next.add(claimKey("Transfers", transferRowId));
+            return next;
+          });
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [account, rows] of Object.entries(prev)) {
+              next[account] = rows.map((row) => {
+                if (idForTx(row.bankTransaction) !== id) return row;
+                const tr = sheetTransfers.find((t) => (t.transferRowId ?? "").trim() === transferRowId);
+                if (!tr) return row;
+                const amountSignedForTransfer =
+                  tx.amount < 0 ? -Math.abs(Number(tr.amount ?? 0)) : Math.abs(Number(tr.amount ?? 0));
+                return {
+                  ...row,
+                  matchType: "exact_match",
+                  reason: "Linked transfer row and marked processed.",
+                  matchedSheetTransfer: {
+                    amount: amountSignedForTransfer,
+                    transferRowId,
+                    transferFrom: tr.transferFrom,
+                    transferTo: tr.transferTo,
+                    timestamp: tr.timestamp,
+                    date: tr.date,
+                  },
+                  matchedSheetTransferIndex: undefined,
+                  matchedSheetExpense: undefined,
+                  matchedSheetIndex: undefined,
+                };
+              });
+            }
+            return next;
+          });
+          setDisconnectedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        } catch (err) {
+          setActionError(err instanceof Error ? err.message : "Failed to approve transfer.");
+        } finally {
+          setProcessingId(null);
+        }
+        return;
+      }
+
       setActionError("");
       setProcessingId(id);
       try {
@@ -1696,7 +1923,114 @@ export default function ReconcilePage() {
         setProcessingId(null);
       }
     },
-    [openTransferClaimModal, persistProcessedHash],
+    [openTransferClaimModal, persistProcessedHash, sheetExpenses, sheetTransfers],
+  );
+
+  const handleDisconnectSheetLink = useCallback(
+    async (match: MatchResult) => {
+      if (typeof window !== "undefined") {
+        const ok = window.confirm(
+          "Remove the Neon link between this bank line and the sheet row, unmark it processed, and put it back in review? You can link again with Claim or the checkmark.",
+        );
+        if (!ok) return;
+      }
+      const tx = match.bankTransaction;
+      const bid = idForTx(tx);
+      setActionError("");
+      setProcessingId(bid);
+      try {
+        const bankBody = JSON.stringify({
+          bankTransaction: { hash: tx.hash, accountName: tx.accountName },
+        });
+        const procBody = JSON.stringify({ hash: tx.hash, accountName: tx.accountName });
+        const [claimsDel, transferDel, procDel] = await Promise.all([
+          fetch("/api/reconciliation/claims", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: bankBody,
+          }),
+          fetch("/api/reconciliation/transfer-claims", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: bankBody,
+          }),
+          fetch("/api/reconciliation/processed", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: procBody,
+          }),
+        ]);
+        if (!procDel.ok) {
+          const err = await procDel.json().catch(() => ({ error: procDel.statusText }));
+          throw new Error(err.error || `Could not unmark processed (${procDel.status})`);
+        }
+        if (!claimsDel.ok) {
+          const err = await claimsDel.json().catch(() => ({ error: claimsDel.statusText }));
+          throw new Error(err.error || `Could not remove claim (${claimsDel.status})`);
+        }
+        if (!transferDel.ok) {
+          const err = await transferDel.json().catch(() => ({ error: transferDel.statusText }));
+          throw new Error(err.error || `Could not remove transfer claim (${transferDel.status})`);
+        }
+
+        setProcessedHashes((prev) => {
+          const next = new Set(prev);
+          next.delete(tx.hash);
+          return next;
+        });
+
+        const claimsGet = await fetch("/api/reconciliation/claims", { cache: "no-store" });
+        if (claimsGet.ok) {
+          const data = (await claimsGet.json()) as { claimedRowIds?: string[] };
+          setClaimedRowKeys(new Set((data.claimedRowIds ?? []).map((x) => String(x))));
+        }
+
+        const tGet = await fetch("/api/reconciliation/transfer-claims", { cache: "no-store" });
+        if (tGet.ok) {
+          const data = (await tGet.json()) as { statusByRowId?: TransferClaimStatusByRowId };
+          setTransferClaimStatusByRowId(data.statusByRowId ?? {});
+        }
+
+        const hadStoredCsv = Object.keys(statementCsvRowsByAccountRef.current).length > 0;
+        const patchDisconnectedRow = () => {
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [acct, rows] of Object.entries(prev)) {
+              next[acct] = rows.map((row) => {
+                if (idForTx(row.bankTransaction) !== bid) return row;
+                return {
+                  ...row,
+                  matchType: "unmatched",
+                  reason: "Disconnected from sheet link.",
+                  matchedSheetExpense: undefined,
+                  matchedSheetTransfer: undefined,
+                  matchedSheetIndex: undefined,
+                  matchedSheetTransferIndex: undefined,
+                };
+              });
+            }
+            return mergeWellsFargoBucketIntoChecking(next);
+          });
+        };
+        try {
+          if (hadStoredCsv) {
+            await rematchAllStoredAccounts();
+          } else {
+            patchDisconnectedRow();
+          }
+        } catch (rematchErr) {
+          setActionError(
+            rematchErr instanceof Error ? rematchErr.message : "Rematch failed after disconnect.",
+          );
+          patchDisconnectedRow();
+        }
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Failed to disconnect link.");
+      } finally {
+        setProcessingId(null);
+      }
+    },
+    [rematchAllStoredAccounts],
   );
 
   const openDismissModal = useCallback((match: MatchResult) => {
@@ -2426,10 +2760,12 @@ export default function ReconcilePage() {
   const activeCompletedRows = (statementCompletedRowsByAccount[activeTab] ?? []).filter(
     (row) => row.bankTransaction.accountName === activeTab,
   );
-  const activeMatchedRows = sortByNewestDate(
+  const activeMatchedRowsAll = sortByNewestDate(
     [...activeAutoMatchedRows, ...activeCompletedRows],
     (row) => row.bankTransaction.date,
   );
+  const activeUserLinkedMatchedRows = activeMatchedRowsAll.filter((m) => hasLinkedUserInputtedEntry(m));
+  const activeStatementClosedOnlyRows = activeMatchedRowsAll.filter((m) => !hasLinkedUserInputtedEntry(m));
   const selectedAccountUploadedFiles = uploadedFilesByAccount[selectedAccount] ?? [];
 
   return (
@@ -2717,8 +3053,15 @@ export default function ReconcilePage() {
                 <span className="text-xs text-gray-300">{homeFilteredMatchedRows.length}</span>
               </div>
               <div className="p-3 text-sm">
-                {allHomeMatchedMatches.length === 0 ? (
-                  <p className="text-gray-400">No matched user-inputted transactions yet.</p>
+                <p className="text-xs text-gray-500 mb-3">
+                  When a suggested row has a sheet Row ID, the checkmark saves a real Neon link between that expense
+                  or transfer and the bank line (same as Claim). If there is no Row ID, the checkmark only marks the
+                  statement processed—see{" "}
+                  <span className="text-gray-400">Statement: closed without sheet row</span>. Use{" "}
+                  <span className="text-gray-400">Disconnect</span> to undo a link and match again.
+                </p>
+                {allHomeUserLinkedMatchedMatches.length === 0 ? (
+                  <p className="text-gray-400">No sheet-linked matches yet.</p>
                 ) : homeFilteredMatchedRows.length === 0 ? (
                   <p className="text-gray-400">No rows match your search or account filter.</p>
                 ) : (
@@ -2732,7 +3075,7 @@ export default function ReconcilePage() {
                           key={`${rowId}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="grid gap-3 md:grid-cols-2 items-start">
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 User-inputted Entry
@@ -2784,6 +3127,22 @@ export default function ReconcilePage() {
                                 {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
                               </p>
                             </div>
+                            <div className="shrink-0 flex items-start pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => void handleDisconnectSheetLink(match)}
+                                disabled={processingId === rowId}
+                                className="p-1.5 rounded-md text-orange-300/90 hover:text-orange-200 hover:bg-orange-500/10 disabled:opacity-60 transition-colors"
+                                title="Remove sheet link and reopen this bank line"
+                                aria-label="Disconnect sheet link"
+                              >
+                                {processingId === rowId ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Link2Off className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -2792,6 +3151,66 @@ export default function ReconcilePage() {
                 )}
               </div>
             </section>
+
+            {allHomeStatementClosedOnlyMatches.length > 0 && (
+              <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
+                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+                  <h2 className="text-white font-semibold">Statement: closed without sheet row</h2>
+                  <span className="text-xs text-gray-300">{homeFilteredStatementClosedRows.length}</span>
+                </div>
+                <div className="p-3 text-sm">
+                  <p className="text-xs text-gray-500 mb-3">
+                    Processed or dismissed on the bank side only—no expense/transfer row attached in the matcher. To
+                    account for them: add or fix the row in Google Sheets, refresh matches for that account, then use{" "}
+                    <span className="text-gray-400">Claim</span> on the home list (or Claim from an unmatched
+                    statement row).
+                  </p>
+                  {homeFilteredStatementClosedRows.length === 0 ? (
+                    <p className="text-gray-400">No rows match your search or account filter.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {homeFilteredStatementClosedRows.map((match, index) => {
+                        const tx = match.bankTransaction;
+                        const rowId = idForTx(tx);
+                        const dismissalNote = dismissalNotesById[rowId];
+                        return (
+                          <div
+                            key={`closed-${rowId}-${index}`}
+                            className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                          >
+                            <div className="grid gap-3 md:grid-cols-2 items-start">
+                              <div className="min-w-0">
+                                <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                  Statement status
+                                </p>
+                                {dismissalNote ? (
+                                  <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                                    Dismissed: {dismissalNote}
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-gray-500">
+                                    Processed on statement only — no linked expense or transfer row in the matcher.
+                                  </p>
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                  Bank transaction
+                                </p>
+                                <p className="text-gray-200 truncate">{tx.description || "—"}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden min-w-0">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
@@ -3040,15 +3459,20 @@ export default function ReconcilePage() {
 
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">{activeTab}: Matched</h2>
-                <span className="text-xs text-gray-300">{activeMatchedRows.length}</span>
+                <h2 className="text-white font-semibold">{activeTab}: Matched to sheet</h2>
+                <span className="text-xs text-gray-300">{activeUserLinkedMatchedRows.length}</span>
               </div>
               <div className="p-3 text-sm">
-                {activeMatchedRows.length === 0 ? (
-                  <p className="text-gray-400">No matched rows for this account yet.</p>
+                <p className="text-xs text-gray-500 mb-3">
+                  Checkmark with a sheet Row ID saves the Neon claim link.{" "}
+                  <span className="text-gray-400">Disconnect</span> removes the link and unmarks processed so you can
+                  match again.
+                </p>
+                {activeUserLinkedMatchedRows.length === 0 ? (
+                  <p className="text-gray-400">No rows linked to an expense or transfer for this account yet.</p>
                 ) : (
                   <div className="space-y-2">
-                    {activeMatchedRows.map((match, index) => {
+                    {activeUserLinkedMatchedRows.map((match, index) => {
                       const tx = match.bankTransaction;
                       const rowId = idForTx(tx);
                       const dismissalNote = dismissalNotesById[rowId];
@@ -3057,7 +3481,7 @@ export default function ReconcilePage() {
                           key={`${rowId}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
-                          <div className="grid gap-3 md:grid-cols-2 items-start">
+                          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 Bank Transaction
@@ -3106,6 +3530,22 @@ export default function ReconcilePage() {
                                 <p className="text-xs text-gray-500">Processed</p>
                               )}
                             </div>
+                            <div className="shrink-0 flex items-start pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => void handleDisconnectSheetLink(match)}
+                                disabled={processingId === rowId}
+                                className="p-1.5 rounded-md text-orange-300/90 hover:text-orange-200 hover:bg-orange-500/10 disabled:opacity-60 transition-colors"
+                                title="Remove sheet link and reopen this bank line"
+                                aria-label="Disconnect sheet link"
+                              >
+                                {processingId === rowId ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Link2Off className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -3114,6 +3554,60 @@ export default function ReconcilePage() {
                 )}
               </div>
             </section>
+
+            {activeStatementClosedOnlyRows.length > 0 && (
+              <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
+                <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+                  <h2 className="text-white font-semibold">{activeTab}: Closed on statement (no sheet link)</h2>
+                  <span className="text-xs text-gray-300">{activeStatementClosedOnlyRows.length}</span>
+                </div>
+                <div className="p-3 text-sm">
+                  <p className="text-xs text-gray-500 mb-3">
+                    Processed or dismissed here without a linked expense/transfer row. Add or fix the sheet row and
+                    refresh matches, or use Claim where amounts match.
+                  </p>
+                  <div className="space-y-2">
+                    {activeStatementClosedOnlyRows.map((match, index) => {
+                      const tx = match.bankTransaction;
+                      const rowId = idForTx(tx);
+                      const dismissalNote = dismissalNotesById[rowId];
+                      return (
+                        <div
+                          key={`acct-closed-${rowId}-${index}`}
+                          className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                        >
+                          <div className="grid gap-3 md:grid-cols-2 items-start">
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Bank Transaction
+                              </p>
+                              <p className="text-gray-200 truncate">{tx.description || "—"}</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {tx.accountName} • {fmtDate(tx.date)} • {fmtMoney(tx.amount)}
+                              </p>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                                Statement status
+                              </p>
+                              {dismissalNote ? (
+                                <p className="text-amber-200/90 text-sm whitespace-pre-wrap break-words">
+                                  Dismissed: {dismissalNote}
+                                </p>
+                              ) : (
+                                <p className="text-xs text-gray-500">
+                                  Processed on statement only — no linked sheet row.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+            )}
 
             {activeReviewRows.length > 0 && (
               <p className="text-xs text-gray-500">
