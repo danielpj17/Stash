@@ -246,6 +246,33 @@ function mergeCsvRowArrays(existing: string[][] | undefined, incoming: string[][
   return Array.from(byKey.values());
 }
 
+/** Merge match arrays by hash; incoming rows replace older versions of same hash. */
+function mergeMatchArrays(existing: MatchResult[] | undefined, incoming: MatchResult[]): MatchResult[] {
+  const byHash = new Map<string, MatchResult>();
+  for (const row of existing ?? []) {
+    byHash.set(row.bankTransaction.hash, row);
+  }
+  for (const row of incoming) {
+    byHash.set(row.bankTransaction.hash, row);
+  }
+  return Array.from(byHash.values());
+}
+
+function parseStoredStatementCsvRows(raw: unknown): Record<string, string[][]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const next: Record<string, string[][]> = {};
+  for (const [accountName, rows] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(rows)) continue;
+    const normalizedRows = rows
+      .filter((row): row is unknown[] => Array.isArray(row))
+      .map((row) => row.map((cell) => String(cell ?? "")));
+    if (normalizedRows.length > 0) {
+      next[accountName] = normalizedRows;
+    }
+  }
+  return next;
+}
+
 function fmtMoney(amount: number): string {
   return amount.toLocaleString("en-US", {
     style: "currency",
@@ -584,6 +611,7 @@ export default function ReconcilePage() {
         selectedAccount?: string;
         activeTab?: string;
         matchesByAccount?: Record<string, MatchResult[]>;
+        statementCsvRowsByAccount?: Record<string, unknown>;
       };
 
       if (
@@ -602,6 +630,9 @@ export default function ReconcilePage() {
       ) {
         setMatchesByAccount(mergeWellsFargoBucketIntoChecking(parsed.matchesByAccount));
       }
+      statementCsvRowsByAccountRef.current = parseStoredStatementCsvRows(
+        parsed.statementCsvRowsByAccount,
+      );
     } catch {
       // Ignore corrupted local storage and continue with empty in-memory state.
     }
@@ -617,6 +648,7 @@ export default function ReconcilePage() {
       selectedAccount,
       activeTab,
       matchesByAccount,
+      statementCsvRowsByAccount: statementCsvRowsByAccountRef.current,
     };
     try {
       window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
@@ -3048,7 +3080,7 @@ export default function ReconcilePage() {
         setMatchesByAccount((prev) =>
           mergeWellsFargoBucketIntoChecking({
             ...prev,
-            [selectedAccount]: data.matches,
+            [selectedAccount]: mergeMatchArrays(prev[selectedAccount], data.matches),
           }),
         );
         if (autoApprovedHashes.length > 0) {
