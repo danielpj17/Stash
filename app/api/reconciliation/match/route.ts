@@ -32,6 +32,12 @@ type MatchRequestBody = {
   processedHashes?: unknown;
 };
 
+type ClaimLinkRow = {
+  bank_hash: string;
+  sheet_name: string;
+  sheet_row_id: string;
+};
+
 function readStringFieldCaseInsensitive(
   row: Record<string, unknown>,
   keys: string[],
@@ -191,6 +197,46 @@ async function getTransferClaimStatusByRowId(): Promise<
   }
 }
 
+async function getClaimLinksByBankHashes(
+  bankHashes: string[],
+): Promise<Map<string, Array<{ sheetName: string; sheetRowId: string }>>> {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString || bankHashes.length === 0) {
+    return new Map<string, Array<{ sheetName: string; sheetRowId: string }>>();
+  }
+
+  try {
+    const sql = neon(connectionString);
+    const expenseRows = (await sql`
+      SELECT bank_hash, sheet_name, sheet_row_id
+      FROM reconciliation_claim_links
+      WHERE bank_hash = ANY(${bankHashes}::text[])
+      ORDER BY created_at ASC
+    `) as ClaimLinkRow[];
+    const transferRows = (await sql`
+      SELECT bank_hash, 'Transfers' AS sheet_name, transfer_sheet_row_id AS sheet_row_id
+      FROM reconciliation_transfer_claim_links
+      WHERE bank_hash = ANY(${bankHashes}::text[])
+      ORDER BY created_at ASC
+    `) as ClaimLinkRow[];
+
+    const linksByHash = new Map<string, Array<{ sheetName: string; sheetRowId: string }>>();
+    const allRows = [...expenseRows, ...transferRows];
+    for (const row of allRows) {
+      const bankHash = String(row.bank_hash ?? "").trim();
+      const sheetName = String(row.sheet_name ?? "").trim();
+      const sheetRowId = String(row.sheet_row_id ?? "").trim();
+      if (!bankHash || !sheetName || !sheetRowId) continue;
+      if (!linksByHash.has(bankHash)) linksByHash.set(bankHash, []);
+      linksByHash.get(bankHash)?.push({ sheetName, sheetRowId });
+    }
+    return linksByHash;
+  } catch {
+    // If claim tables do not exist yet, continue with normal matcher behavior.
+    return new Map<string, Array<{ sheetName: string; sheetRowId: string }>>();
+  }
+}
+
 export async function POST(request: NextRequest) {
   let body: MatchRequestBody;
   try {
@@ -216,6 +262,8 @@ export async function POST(request: NextRequest) {
     ...tx,
     accountName,
   }));
+  const bankHashes = Array.from(new Set(bankTransactions.map((tx) => tx.hash)));
+  const claimLinksByHash = await getClaimLinksByBankHashes(bankHashes);
 
   const claimedExpenseRowIds = await getClaimedExpenseRowIds();
   const transferClaimStatusByRowId = await getTransferClaimStatusByRowId();
@@ -231,10 +279,83 @@ export async function POST(request: NextRequest) {
     return !claimStatus?.isComplete;
   });
 
-  const matches = await findMatches(bankTransactions, unclaimedSheetExpenses, {
+  const expenseByRowId = new Map(
+    sheetExpenses
+      .map((row) => {
+        const rowId = String(row.rowId ?? "").trim();
+        return rowId ? [rowId, row] : null;
+      })
+      .filter(
+        (
+          entry,
+        ): entry is [string, SheetExpenseLike] => entry !== null,
+      ),
+  );
+  const transferByRowId = new Map(
+    sheetTransfers
+      .map((row) => {
+        const rowId = String(row.transferRowId ?? "").trim();
+        return rowId ? [rowId, row] : null;
+      })
+      .filter(
+        (
+          entry,
+        ): entry is [string, SheetTransferLike] => entry !== null,
+      ),
+  );
+
+  const claimedMatches: Awaited<ReturnType<typeof findMatches>> = [];
+  const unclaimedBankTransactions: typeof bankTransactions = [];
+  for (const tx of bankTransactions) {
+    const links = claimLinksByHash.get(tx.hash);
+    if (!links || links.length === 0) {
+      unclaimedBankTransactions.push(tx);
+      continue;
+    }
+
+    const linkedExpense = links
+      .filter((link) => link.sheetName === "Expenses")
+      .map((link) => expenseByRowId.get(link.sheetRowId))
+      .find((row): row is SheetExpenseLike => Boolean(row));
+    if (linkedExpense) {
+      claimedMatches.push({
+        bankTransaction: tx,
+        matchType: "exact_match" as const,
+        reason: "Claim Link: restored from Neon claim link.",
+        matchedSheetExpense: linkedExpense,
+        matchedSheetIndex: undefined,
+      });
+      continue;
+    }
+
+    const linkedTransfer = links
+      .filter((link) => link.sheetName === "Transfers")
+      .map((link) => transferByRowId.get(link.sheetRowId))
+      .find((row): row is SheetTransferLike => Boolean(row));
+    if (linkedTransfer) {
+      claimedMatches.push({
+        bankTransaction: tx,
+        matchType: "exact_match" as const,
+        reason: "Claim Link: restored from Neon transfer claim.",
+        matchedSheetTransfer: linkedTransfer,
+        matchedSheetTransferIndex: undefined,
+      });
+      continue;
+    }
+
+    claimedMatches.push({
+      bankTransaction: tx,
+      matchType: "processed" as const,
+      reason: "Claim Link exists in Neon, but linked sheet row was not found in current sheet payload.",
+      matchedByNeonHash: true,
+    });
+  }
+
+  const matcherMatches = await findMatches(unclaimedBankTransactions, unclaimedSheetExpenses, {
     processedHashes,
     sheetTransfers: availableSheetTransfers,
     transferClaimStatusByRowId,
   });
+  const matches = [...claimedMatches, ...matcherMatches];
   return NextResponse.json({ bankTransactions, matches });
 }

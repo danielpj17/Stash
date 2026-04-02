@@ -311,6 +311,13 @@ function hasLinkedUserInputtedEntry(match: MatchResult): boolean {
   return Boolean(match.matchedSheetExpense || match.matchedSheetTransfer);
 }
 
+function hasLinkedOrClaimedEntry(
+  match: MatchResult,
+  bankHashesWithNeonClaim: Set<string>,
+): boolean {
+  return hasLinkedUserInputtedEntry(match) || bankHashesWithNeonClaim.has(match.bankTransaction.hash);
+}
+
 /** Processed in Neon but no row in claim tables — should show in review, not "closed without sheet". */
 function isProcessedWithoutNeonClaim(
   match: MatchResult,
@@ -895,8 +902,9 @@ export default function ReconcilePage() {
         }
         if (!processedHashes.has(match.bankTransaction.hash)) return false;
         const dismissed = Boolean(dismissalNotesById[id]);
+        const linkedOrClaimed = hasLinkedOrClaimedEntry(match, bankHashesWithNeonClaim);
         const completedWithoutExactSheet =
-          match.matchType !== "exact_match" || !hasLinkedUserInputtedEntry(match);
+          match.matchType !== "exact_match" || !linkedOrClaimed;
         return completedWithoutExactSheet || dismissed;
       });
     });
@@ -1105,13 +1113,13 @@ export default function ReconcilePage() {
 
   /** Real sheet ↔ bank pairs only (excludes “approve checkmark” / dismiss with no expense or transfer row). */
   const allHomeUserLinkedMatchedMatches = useMemo(
-    () => allHomeMatchedMatches.filter((m) => hasLinkedUserInputtedEntry(m)),
-    [allHomeMatchedMatches],
+    () => allHomeMatchedMatches.filter((m) => hasLinkedOrClaimedEntry(m, bankHashesWithNeonClaim)),
+    [allHomeMatchedMatches, bankHashesWithNeonClaim],
   );
 
   const allHomeStatementClosedOnlyMatches = useMemo(
-    () => allHomeMatchedMatches.filter((m) => !hasLinkedUserInputtedEntry(m)),
-    [allHomeMatchedMatches],
+    () => allHomeMatchedMatches.filter((m) => !hasLinkedOrClaimedEntry(m, bankHashesWithNeonClaim)),
+    [allHomeMatchedMatches, bankHashesWithNeonClaim],
   );
 
   const homeFilteredMatchedRows = useMemo(() => {
@@ -3141,8 +3149,12 @@ export default function ReconcilePage() {
     [...activeAutoMatchedRows, ...activeCompletedRows],
     (row) => row.bankTransaction.date,
   );
-  const activeUserLinkedMatchedRows = activeMatchedRowsAll.filter((m) => hasLinkedUserInputtedEntry(m));
-  const activeStatementClosedOnlyRows = activeMatchedRowsAll.filter((m) => !hasLinkedUserInputtedEntry(m));
+  const activeUserLinkedMatchedRows = activeMatchedRowsAll.filter((m) =>
+    hasLinkedOrClaimedEntry(m, bankHashesWithNeonClaim),
+  );
+  const activeStatementClosedOnlyRows = activeMatchedRowsAll.filter(
+    (m) => !hasLinkedOrClaimedEntry(m, bankHashesWithNeonClaim),
+  );
   const selectedAccountUploadedFiles = uploadedFilesByAccount[selectedAccount] ?? [];
 
   return (
