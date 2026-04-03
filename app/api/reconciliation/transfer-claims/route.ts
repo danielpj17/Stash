@@ -82,12 +82,12 @@ export async function GET() {
     for (const row of rows) {
       const rowId = String(row.transfer_sheet_row_id ?? "").trim();
       if (!rowId) continue;
+      const expectedLegs = Number(row.expected_legs ?? 2) === 1 ? 1 : 2;
       if (!statusByRowId[rowId]) {
-        statusByRowId[rowId] = { claimedCount: 0, expectedLegs: 2, isComplete: false };
+        statusByRowId[rowId] = { claimedCount: 0, expectedLegs, isComplete: false };
       }
       statusByRowId[rowId].claimedCount += 1;
-      const expectedLegs = Number(row.expected_legs ?? 2) === 1 ? 1 : 2;
-      if (expectedLegs > statusByRowId[rowId].expectedLegs) {
+      if (expectedLegs < statusByRowId[rowId].expectedLegs) {
         statusByRowId[rowId].expectedLegs = expectedLegs;
       }
       statusByRowId[rowId].isComplete =

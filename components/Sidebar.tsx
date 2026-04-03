@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   PlusCircle,
-  Wallet,
   PiggyBank,
   TrendingUp,
   ClipboardCheck,
@@ -15,8 +14,7 @@ import StashLogo from "./StashLogo";
 
 const navItems = [
   { href: "/new-expense", label: "New Expense", icon: PlusCircle },
-  { href: "/", label: "Expenses", icon: Wallet },
-  { href: "/budget", label: "Budget", icon: PiggyBank },
+  { href: "/", label: "Budget", icon: PiggyBank },
   { href: "/net-worth", label: "Net Worth", icon: TrendingUp },
   { href: "/reconcile", label: "Reconcile", icon: ClipboardCheck },
 ];

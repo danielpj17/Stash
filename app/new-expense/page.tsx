@@ -130,7 +130,7 @@ export default function NewExpensePage() {
                 href="/"
                 className="px-4 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-300 hover:text-white hover:border-accent/50 transition-colors"
               >
-                View Expenses
+                View Budget
               </Link>
             </div>
           </form>
