@@ -513,10 +513,8 @@ export default function BudgetPage() {
     const num = parseFloat(editBudgetValue.replace(/,/g, ""));
     const amount = Number.isNaN(num) ? 0 : num;
     const base = allBudgets ?? {};
-    const monthData = { ...(base[selectedMonth] ?? {}) };
-    EXPENSE_CATEGORIES.forEach((cat) => {
-      if (monthData[cat] === undefined) monthData[cat] = 0;
-    });
+    // Seed from carry-forward (same as display) so we don't persist zeros for categories the user never edited.
+    const monthData = { ...resolveBudgetForMonth(selectedMonth, allBudgets) };
     monthData[selectedCategory] = amount;
     const next: MonthlyBudgets = { ...base, [selectedMonth]: monthData };
     try {
