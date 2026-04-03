@@ -84,6 +84,7 @@ export type MatchType =
   | "exact_match"
   | "processed"
   | "questionable_match_fuzzy"
+  | "suggested_match"
   | "transfer"
   | "unmatched";
 
@@ -97,6 +98,9 @@ export type MatchResult = {
   matchedSheetTransferIndex?: number;
   transferCounterparty?: BankTransaction;
   matchedByNeonHash?: boolean;
+  confidenceScore?: number;
+  candidateCount?: number;
+  isAmbiguousCluster?: boolean;
 };
 
 /**
@@ -163,6 +167,64 @@ function toIndexedMap(rows: SheetExpenseLike[]): Map<string, SheetExpenseLike[]>
     indexed.get(key)?.push(row);
   }
   return indexed;
+}
+
+function toAmountOnlyIndex(rows: SheetExpenseLike[]): Map<number, SheetExpenseLike[]> {
+  const indexed = new Map<number, SheetExpenseLike[]>();
+  for (const row of rows) {
+    const key = amountKey(row.amount);
+    if (!indexed.has(key)) indexed.set(key, []);
+    indexed.get(key)!.push(row);
+  }
+  return indexed;
+}
+
+function scoreCandidate(
+  tx: BankTransaction,
+  sheet: SheetExpenseLike,
+  dayDistance: number | null,
+): number {
+  let score = 0;
+  const days = dayDistance ?? 999;
+  if (days <= 0) score += 1.0;
+  else if (days <= 1) score += 0.9;
+  else if (days <= 3) score += 0.7;
+  else if (days <= 7) score += 0.5;
+  else if (days <= 14) score += 0.3;
+  else if (days <= 31) score += 0.15;
+  else score += 0.05;
+
+  score += descriptionSimilarity(tx.description, sheet.description ?? "") * 0.5;
+
+  if (sheet.account && sheet.account === tx.accountName) score += 0.2;
+  return score;
+}
+
+const CLUSTER_DAY_DISTANCE = 1;
+const CLUSTER_DESCRIPTION_SIMILARITY = 0.3;
+
+/**
+ * Detect bank txs that are part of an "ambiguous cluster": multiple bank
+ * transactions with the same amount, close dates, and similar descriptions
+ * (same merchant). These should never be auto-matched — they require manual
+ * review to avoid swapping the wrong pairs.
+ */
+function buildClusterSet(bankTransactions: BankTransaction[]): Set<string> {
+  const clusterHashes = new Set<string>();
+  for (let i = 0; i < bankTransactions.length; i++) {
+    const a = bankTransactions[i];
+    for (let j = i + 1; j < bankTransactions.length; j++) {
+      const b = bankTransactions[j];
+      if (amountKey(a.amount) !== amountKey(b.amount)) continue;
+      const dayDist = dateDistanceInDays(a.date, b.date);
+      if (dayDist === null || dayDist > CLUSTER_DAY_DISTANCE) continue;
+      if (descriptionSimilarity(a.description, b.description) >= CLUSTER_DESCRIPTION_SIMILARITY) {
+        clusterHashes.add(a.hash);
+        clusterHashes.add(b.hash);
+      }
+    }
+  }
+  return clusterHashes;
 }
 
 function isProfileConfigured(profile: BankProfile): boolean {
@@ -387,9 +449,6 @@ function descriptionSimilarity(a: string, b: string): number {
   return denom > 0 ? overlap / denom : 0;
 }
 
-const MIN_FUZZY_DESCRIPTION_SIMILARITY = 0.2;
-const AUTO_MATCH_MAX_DAY_DISTANCE = 3;
-const QUESTIONABLE_MAX_DAY_DISTANCE = 31;
 const TRANSFER_CANDIDATE_MAX_DAY_DISTANCE = 31;
 
 function isLikelyTransferDescription(value: string): boolean {
@@ -486,9 +545,12 @@ async function getProcessedTransactionHashes(): Promise<Set<string>> {
  * Priority:
  * 1) Exact Match: amount+date equals a sheet row.
  * 2) Processed: hash exists in Neon but no current sheet row is linked.
- * 3) Questionable Match (Fuzzy): amount matches with description similarity and date is within +/- 31 days.
- * 4) Transfer: amount/date aligns with transfer rows or opposing bank transaction.
- * 5) Unmatched.
+ * 3) Transfer: amount/date aligns with transfer rows or opposing bank transaction.
+ * 4) Amount-first expense matching:
+ *    a) Auto-match (exact_match): high score, clear margin, not in ambiguous cluster.
+ *    b) Suggested (suggested_match): amount matches but confidence too low for auto.
+ * 5) Cross-account counterparty transfer.
+ * 6) Unmatched: no amount match found at all.
  */
 export async function findMatches(
   bankTransactions: BankTransaction[],
@@ -503,8 +565,16 @@ export async function findMatches(
     ? new Set(options.processedHashes)
     : await getProcessedTransactionHashes();
   const exactSheetIndex = toIndexedMap(sheetExpenses);
+  const amountIndex = toAmountOnlyIndex(sheetExpenses);
+  const clusterSet = buildClusterSet(bankTransactions);
 
-  return bankTransactions.map((tx) => {
+  const AUTO_SCORE_THRESHOLD = 1.0;
+  const AUTO_SCORE_MARGIN = 0.3;
+
+  const consumedRowIds = new Set<string>();
+  const results: MatchResult[] = [];
+
+  for (const tx of bankTransactions) {
     const txDate = normalizeDateOnly(tx.date);
     const exactKey = `${amountKey(tx.amount)}|${txDate}`;
     const exactSheet = exactSheetIndex.get(exactKey)?.[0];
@@ -514,23 +584,27 @@ export async function findMatches(
     const exactByHash = processedHashes.has(tx.hash);
 
     if (exactSheet) {
-      return {
+      const rowId = String(exactSheet.rowId ?? "").trim();
+      if (rowId) consumedRowIds.add(rowId);
+      results.push({
         bankTransaction: tx,
         matchType: "exact_match",
         reason: "Exact Match: identical amount and date already exists in sheet.",
         matchedByNeonHash: exactByHash,
         matchedSheetExpense: exactSheet,
         matchedSheetIndex: exactSheetIndexValue >= 0 ? exactSheetIndexValue : undefined,
-      };
+      });
+      continue;
     }
     if (exactByHash) {
-      return {
+      results.push({
         bankTransaction: tx,
         matchType: "processed",
         reason:
           "Already processed: transaction hash exists in Neon, but no linked sheet entry is currently found.",
         matchedByNeonHash: true,
-      };
+      });
+      continue;
     }
 
     const sheetTransfers = options?.sheetTransfers ?? [];
@@ -587,81 +661,86 @@ export async function findMatches(
     if (bestSheetTransfer) {
       const uniqueTransferCandidate = transferCandidates.length === 1;
       if (uniqueTransferCandidate) {
-        return {
+        results.push({
           bankTransaction: tx,
           matchType: "transfer",
           reason:
             "Transfer Match: amount/date aligns with a transfer already logged in sheet.",
           matchedSheetTransfer: bestSheetTransfer.row,
           matchedSheetTransferIndex: bestSheetTransfer.index,
-        };
+        });
+        continue;
       }
 
-      return {
+      results.push({
         bankTransaction: tx,
         matchType: "questionable_match_fuzzy",
         reason:
           "Questionable Transfer Match: multiple transfer-sheet candidates share the same amount/date window.",
         matchedSheetTransfer: bestSheetTransfer.row,
         matchedSheetTransferIndex: bestSheetTransfer.index,
-      };
+      });
+      continue;
     }
 
-    const fuzzyCandidates = sheetExpenses
-      .map((sheetRow, index) => {
-        if (amountKey(sheetRow.amount) !== amountKey(tx.amount)) return null;
+    // --- Amount-first expense matching ---
+    const amountCandidateRows = amountIndex.get(amountKey(tx.amount)) ?? [];
+    const scoredCandidates = amountCandidateRows
+      .map((sheetRow, _i) => {
+        const rowId = String(sheetRow.rowId ?? "").trim();
         const sheetDate = sheetRow.date ?? sheetRow.timestamp ?? "";
-        const dayDistance = dateDistanceInDays(sheetDate, tx.date);
-        if (dayDistance === null || dayDistance > QUESTIONABLE_MAX_DAY_DISTANCE) return null;
-        const similarity = descriptionSimilarity(
-          tx.description,
-          sheetRow.description ?? "",
-        );
-        if (similarity < MIN_FUZZY_DESCRIPTION_SIMILARITY) return null;
-        return { index, row: sheetRow, dayDistance, similarity };
+        const dayDist = dateDistanceInDays(sheetDate, tx.date);
+        const score = scoreCandidate(tx, sheetRow, dayDist);
+        const globalIndex = sheetExpenses.indexOf(sheetRow);
+        return { row: sheetRow, index: globalIndex, dayDistance: dayDist, score, rowId };
       })
-      .filter(
-        (
-          candidate,
-        ): candidate is {
-          index: number;
-          row: SheetExpenseLike;
-          dayDistance: number;
-          similarity: number;
-        } => candidate !== null,
-      )
-      .sort((a, b) => {
-        if (a.dayDistance !== b.dayDistance) return a.dayDistance - b.dayDistance;
-        return b.similarity - a.similarity;
-      });
+      .sort((a, b) => b.score - a.score);
 
-    const bestFuzzy = fuzzyCandidates[0];
-    if (bestFuzzy) {
-      const uniqueCandidate = fuzzyCandidates.length === 1;
-      const shouldPromoteToAutoMatch =
-        uniqueCandidate &&
-        bestFuzzy.dayDistance <= AUTO_MATCH_MAX_DAY_DISTANCE &&
-        bestFuzzy.similarity >= MIN_FUZZY_DESCRIPTION_SIMILARITY;
+    if (scoredCandidates.length > 0) {
+      const best = scoredCandidates[0];
+      const second = scoredCandidates[1];
+      const isCluster = clusterSet.has(tx.hash);
+      const bestConsumed = best.rowId ? consumedRowIds.has(best.rowId) : false;
+      const margin = second ? best.score - second.score : Infinity;
 
-      if (shouldPromoteToAutoMatch) {
-        return {
+      const shouldAutoMatch =
+        best.score >= AUTO_SCORE_THRESHOLD &&
+        margin >= AUTO_SCORE_MARGIN &&
+        !isCluster &&
+        !bestConsumed;
+
+      if (shouldAutoMatch) {
+        if (best.rowId) consumedRowIds.add(best.rowId);
+        results.push({
           bankTransaction: tx,
           matchType: "exact_match",
-          reason:
-            "Auto Match: unique close-date amount match with strong description similarity.",
-          matchedSheetExpense: bestFuzzy.row,
-          matchedSheetIndex: bestFuzzy.index,
-        };
+          reason: `Auto Match: amount-first scoring (score ${best.score.toFixed(2)}, margin ${margin === Infinity ? "∞" : margin.toFixed(2)}).`,
+          matchedSheetExpense: best.row,
+          matchedSheetIndex: best.index >= 0 ? best.index : undefined,
+          confidenceScore: best.score,
+          candidateCount: scoredCandidates.length,
+          isAmbiguousCluster: isCluster,
+        });
+        continue;
       }
 
-      return {
+      const reasonParts: string[] = [];
+      if (isCluster) reasonParts.push("ambiguous cluster (same merchant/amount/date)");
+      if (bestConsumed) reasonParts.push("best candidate already consumed by another match");
+      if (best.score < AUTO_SCORE_THRESHOLD) reasonParts.push(`score ${best.score.toFixed(2)} below auto threshold`);
+      if (margin < AUTO_SCORE_MARGIN) reasonParts.push(`margin ${margin === Infinity ? "∞" : margin.toFixed(2)} too narrow`);
+
+      results.push({
         bankTransaction: tx,
-        matchType: "questionable_match_fuzzy",
-        reason:
-          "Questionable Match (Fuzzy): amount/description align and sheet date is within +/- 31 days.",
-        matchedSheetExpense: bestFuzzy.row,
-        matchedSheetIndex: bestFuzzy.index,
-      };
+        matchType: "suggested_match",
+        reason: `Suggested Match: exact amount, needs approval (${reasonParts.join("; ")}).`,
+        matchedSheetExpense: best.row,
+        matchedSheetIndex: best.index >= 0 ? best.index : undefined,
+        confidenceScore: best.score,
+        candidateCount: scoredCandidates.length,
+        isAmbiguousCluster: isCluster,
+      });
+      continue;
     }
 
     if (tx.amount < 0) {
@@ -672,20 +751,23 @@ export async function findMatches(
       });
 
       if (transferCounterparty) {
-        return {
+        results.push({
           bankTransaction: tx,
           matchType: "transfer",
           reason:
             "Transfer detected: negative amount matches positive amount in a different account on the same day.",
           transferCounterparty,
-        };
+        });
+        continue;
       }
     }
 
-    return {
+    results.push({
       bankTransaction: tx,
       matchType: "unmatched",
-      reason: "No exact, fuzzy, or transfer match found.",
-    };
-  });
+      reason: "No amount match found in sheet expenses, transfers, or cross-account counterparties.",
+    });
+  }
+
+  return results;
 }

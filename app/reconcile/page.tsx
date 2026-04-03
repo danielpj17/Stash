@@ -303,6 +303,7 @@ function isStatementManualReview(match: MatchResult): boolean {
   return (
     match.matchType === "unmatched" ||
     match.matchType === "questionable_match_fuzzy" ||
+    match.matchType === "suggested_match" ||
     match.matchType === "transfer"
   );
 }
@@ -2079,7 +2080,7 @@ export default function ReconcilePage() {
       if (
         match.matchedSheetTransfer &&
         transferRowId &&
-        (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy")
+        (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy" || match.matchType === "suggested_match")
       ) {
         openTransferClaimModal(match);
         return;
@@ -3325,7 +3326,8 @@ export default function ReconcilePage() {
                       const isTransferCandidate = Boolean(
                         match &&
                           (match.matchType === "transfer" ||
-                            match.matchType === "questionable_match_fuzzy") &&
+                            match.matchType === "questionable_match_fuzzy" ||
+                            match.matchType === "suggested_match") &&
                           Boolean(match.matchedSheetTransfer?.transferRowId),
                       );
                       return (
@@ -3744,7 +3746,7 @@ export default function ReconcilePage() {
                       const tx = match.bankTransaction;
                       const id = idForTx(tx);
                       const isTransferCandidate =
-                        (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy") &&
+                        (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy" || match.matchType === "suggested_match") &&
                         Boolean(match.matchedSheetTransfer?.transferRowId);
                       return (
                         <div
@@ -3765,9 +3767,9 @@ export default function ReconcilePage() {
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                                 Possible Sheet Match
                               </p>
-                              {match.matchType === "questionable_match_fuzzy" && match.matchedSheetExpense ? (
+                              {(match.matchType === "questionable_match_fuzzy" || match.matchType === "suggested_match") && match.matchedSheetExpense ? (
                                 <>
-                                  <p className="text-yellow-300 text-sm truncate">
+                                  <p className={`text-sm truncate ${match.matchType === "suggested_match" ? "text-blue-300" : "text-yellow-300"}`}>
                                     {match.matchedSheetExpense.description || "—"}
                                   </p>
                                   <p className="text-xs text-gray-400 mt-0.5">
@@ -3778,14 +3780,20 @@ export default function ReconcilePage() {
                                       ? ` • ${match.matchedSheetExpense.account}`
                                       : ""}
                                   </p>
+                                  {match.matchType === "suggested_match" && (
+                                    <p className="text-[11px] text-blue-400/70 mt-0.5">
+                                      Suggested — approve to confirm
+                                    </p>
+                                  )}
                                 </>
                               ) : (match.matchType === "questionable_match_fuzzy" ||
+                                  match.matchType === "suggested_match" ||
                                   match.matchType === "transfer") &&
                                 match.matchedSheetTransfer ? (
                                 <>
                                   <p
                                     className={`text-sm truncate ${
-                                      match.matchType === "transfer" ? "text-green-300" : "text-yellow-300"
+                                      match.matchType === "transfer" ? "text-green-300" : match.matchType === "suggested_match" ? "text-blue-300" : "text-yellow-300"
                                     }`}
                                   >
                                     {(match.matchedSheetTransfer.transferFrom ?? "—")} →{" "}
@@ -3802,6 +3810,11 @@ export default function ReconcilePage() {
                                   <p className="text-[11px] text-gray-500 mt-0.5">
                                     Transfer Row ID: {match.matchedSheetTransfer.transferRowId ?? "missing"}
                                   </p>
+                                  {match.matchType === "suggested_match" && (
+                                    <p className="text-[11px] text-blue-400/70 mt-0.5">
+                                      Suggested — approve to confirm
+                                    </p>
+                                  )}
                                 </>
                               ) : (
                                 <p className="text-xs text-gray-500">No candidate match</p>
