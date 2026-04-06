@@ -14,6 +14,8 @@ export const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   My529: "My529",
   "Charles Schwab": "Charles Schwab",
   Ally: "Ally",
+  "Capital One": "Capital One",
+  "America First": "America First",
 };
 
 /**
@@ -30,6 +32,8 @@ export const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   My529: 0,
   "Charles Schwab": 0,
   Ally: 0,
+  "Capital One": 0,
+  "America First": 0,
 };
 
 const LIVE_BROKER_ACCOUNT_KEYS: SupportedBroker[] = [

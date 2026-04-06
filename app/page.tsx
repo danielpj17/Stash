@@ -248,6 +248,8 @@ const TRANSFER_FROM_OPTIONS = [
   "My529",
   "Charles Schwab",
   "Ally",
+  "Capital One",
+  "America First",
   "Parents",
   "Cash",
 ] as const;
@@ -262,6 +264,9 @@ const TRANSFER_TO_OPTIONS = [
   "My529",
   "Charles Schwab",
   "Ally",
+  "Capital One",
+  "America First",
+  "Cash",
   "Misc.",
 ] as const;
 
