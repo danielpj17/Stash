@@ -107,21 +107,19 @@ export async function POST(request: NextRequest) {
       await sql`DELETE FROM reconciliation_match_cache WHERE account_name = ${accountName}`;
     }
 
+    // One INSERT per row inside a single transaction. Bulk unnest(..., jsonb[])
+    // is unreliable with Neon's HTTP driver / large JSON payloads; per-row params avoid that.
     if (validMatches.length > 0) {
-      const accountNames = validMatches.map(() => accountName);
-      const hashes = validMatches.map((m) => m.hash);
-      const matchDataArray = validMatches.map((m) => m.data);
-
-      await sql`
-        INSERT INTO reconciliation_match_cache (account_name, bank_hash, match_data)
-        SELECT * FROM unnest(
-          ${accountNames}::text[],
-          ${hashes}::text[],
-          ${matchDataArray}::jsonb[]
-        )
-        ON CONFLICT (account_name, bank_hash)
-        DO UPDATE SET match_data = EXCLUDED.match_data, updated_at = now()
-      `;
+      await sql.transaction(
+        validMatches.map((m) =>
+          sql`
+            INSERT INTO reconciliation_match_cache (account_name, bank_hash, match_data)
+            VALUES (${accountName}, ${m.hash}, ${m.data}::jsonb)
+            ON CONFLICT (account_name, bank_hash)
+            DO UPDATE SET match_data = EXCLUDED.match_data, updated_at = now()
+          `,
+        ),
+      );
     }
 
     return NextResponse.json({ success: true, count: validMatches.length });

@@ -100,20 +100,16 @@ export async function POST(request: NextRequest) {
     const sql = neon(connectionString);
     await ensureCsvRowsTable(sql);
 
-    const accountNames = validRows.map(() => accountName);
-    const dedupeKeys = validRows.map((r) => r.key);
-    const cellsJsonArray = validRows.map((r) => JSON.stringify(r.cells));
-
-    await sql`
-      INSERT INTO reconciliation_csv_rows (account_name, dedupe_key, cells)
-      SELECT * FROM unnest(
-        ${accountNames}::text[],
-        ${dedupeKeys}::text[],
-        ${cellsJsonArray}::jsonb[]
-      )
-      ON CONFLICT (account_name, dedupe_key)
-      DO UPDATE SET cells = EXCLUDED.cells, created_at = now()
-    `;
+    await sql.transaction(
+      validRows.map((r) =>
+        sql`
+          INSERT INTO reconciliation_csv_rows (account_name, dedupe_key, cells)
+          VALUES (${accountName}, ${r.key}, ${JSON.stringify(r.cells)}::jsonb)
+          ON CONFLICT (account_name, dedupe_key)
+          DO UPDATE SET cells = EXCLUDED.cells, created_at = now()
+        `,
+      ),
+    );
 
     return NextResponse.json({ success: true, count: validRows.length });
   } catch (err) {
