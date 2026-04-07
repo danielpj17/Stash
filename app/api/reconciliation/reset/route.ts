@@ -80,6 +80,30 @@ async function ensureUserSheetDismissalsTable(sql: any) {
   `;
 }
 
+async function ensureCsvRowsTable(sql: any) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS reconciliation_csv_rows (
+      account_name TEXT NOT NULL,
+      dedupe_key   TEXT NOT NULL,
+      cells        JSONB NOT NULL,
+      created_at   TIMESTAMP DEFAULT now(),
+      PRIMARY KEY (account_name, dedupe_key)
+    )
+  `;
+}
+
+async function ensureMatchCacheTable(sql: any) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS reconciliation_match_cache (
+      account_name TEXT NOT NULL,
+      bank_hash    TEXT NOT NULL,
+      match_data   JSONB NOT NULL,
+      updated_at   TIMESTAMP DEFAULT now(),
+      PRIMARY KEY (account_name, bank_hash)
+    )
+  `;
+}
+
 export async function POST(request: NextRequest) {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
@@ -108,6 +132,8 @@ export async function POST(request: NextRequest) {
     await ensureUploadedFilesTable(sql);
     await ensureProcessedTable(sql);
     await ensureUserSheetDismissalsTable(sql);
+    await ensureCsvRowsTable(sql);
+    await ensureMatchCacheTable(sql);
 
     await sql`DELETE FROM reconciliation_claim_links`;
     await sql`DELETE FROM reconciliation_transfer_claim_links`;
@@ -115,6 +141,8 @@ export async function POST(request: NextRequest) {
     await sql`DELETE FROM reconciliation_uploaded_files`;
     await sql`DELETE FROM processed_transactions`;
     await sql`DELETE FROM reconciliation_user_sheet_dismissals`;
+    await sql`DELETE FROM reconciliation_csv_rows`;
+    await sql`DELETE FROM reconciliation_match_cache`;
 
     return NextResponse.json({ success: true });
   } catch (err) {

@@ -584,6 +584,7 @@ export default function ReconcilePage() {
     submitting: false,
     error: "",
   });
+  const [neonStateLoading, setNeonStateLoading] = useState(true);
 
   const refreshBankHashesWithNeonClaim = useCallback(async () => {
     try {
@@ -611,59 +612,117 @@ export default function ReconcilePage() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(RECONCILE_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as {
-        selectedAccount?: string;
-        activeTab?: string;
-        matchesByAccount?: Record<string, MatchResult[]>;
-        statementCsvRowsByAccount?: Record<string, unknown>;
-      };
+    let cancelled = false;
 
-      if (
-        parsed.selectedAccount &&
-        ACCOUNT_OPTIONS.includes(parsed.selectedAccount as AccountOption)
-      ) {
-        setSelectedAccount(parsed.selectedAccount as AccountOption);
+    async function loadFromNeon() {
+      try {
+        const [matchCacheRes, csvRowsRes] = await Promise.all([
+          fetch("/api/reconciliation/match-cache", { cache: "no-store" }),
+          fetch("/api/reconciliation/csv-rows", { cache: "no-store" }),
+        ]);
+        if (cancelled) return;
+
+        let neonMatches: Record<string, MatchResult[]> = {};
+        let neonCsvRows: Record<string, string[][]> = {};
+
+        if (matchCacheRes.ok) {
+          const data = (await matchCacheRes.json()) as { matchesByAccount?: Record<string, MatchResult[]> };
+          if (data.matchesByAccount && typeof data.matchesByAccount === "object" && !Array.isArray(data.matchesByAccount)) {
+            neonMatches = data.matchesByAccount;
+          }
+        }
+        if (csvRowsRes.ok) {
+          const data = (await csvRowsRes.json()) as { rowsByAccount?: Record<string, string[][]> };
+          if (data.rowsByAccount && typeof data.rowsByAccount === "object" && !Array.isArray(data.rowsByAccount)) {
+            neonCsvRows = data.rowsByAccount;
+          }
+        }
+
+        if (cancelled) return;
+
+        const neonHasData = Object.keys(neonMatches).length > 0;
+
+        if (!neonHasData && typeof window !== "undefined") {
+          const raw = window.localStorage.getItem(RECONCILE_STORAGE_KEY);
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw) as {
+                selectedAccount?: string;
+                activeTab?: string;
+                matchesByAccount?: Record<string, MatchResult[]>;
+                statementCsvRowsByAccount?: Record<string, unknown>;
+              };
+
+              const localMatches =
+                parsed.matchesByAccount && typeof parsed.matchesByAccount === "object" && !Array.isArray(parsed.matchesByAccount)
+                  ? (parsed.matchesByAccount as Record<string, MatchResult[]>)
+                  : {};
+              const localCsv = parseStoredStatementCsvRows(parsed.statementCsvRowsByAccount);
+              const hasLocalData = Object.values(localMatches).some((arr) => arr.length > 0);
+
+              if (hasLocalData) {
+                const migrationPromises: Promise<Response>[] = [];
+                for (const [accountName, matches] of Object.entries(localMatches)) {
+                  if (matches.length > 0) {
+                    migrationPromises.push(
+                      fetch("/api/reconciliation/match-cache", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ accountName, matches }),
+                      }),
+                    );
+                  }
+                }
+                for (const [accountName, rows] of Object.entries(localCsv)) {
+                  if (rows.length > 0) {
+                    migrationPromises.push(
+                      fetch("/api/reconciliation/csv-rows", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ accountName, rows }),
+                      }),
+                    );
+                  }
+                }
+                await Promise.all(migrationPromises);
+
+                if (cancelled) return;
+                window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
+
+                neonMatches = localMatches;
+                neonCsvRows = localCsv;
+              }
+
+              if (parsed.selectedAccount && ACCOUNT_OPTIONS.includes(parsed.selectedAccount as AccountOption)) {
+                setSelectedAccount(parsed.selectedAccount as AccountOption);
+              }
+              if (typeof parsed.activeTab === "string" && parsed.activeTab.trim()) {
+                setActiveTab(parsed.activeTab);
+              }
+            } catch {
+              // Ignore corrupted localStorage during migration.
+            }
+          }
+        }
+
+        setMatchesByAccount(mergeWellsFargoBucketIntoChecking(neonMatches));
+        statementCsvRowsByAccountRef.current = neonCsvRows;
+      } catch {
+        // Non-fatal; page works with empty state.
+      } finally {
+        if (!cancelled) setNeonStateLoading(false);
       }
-      if (typeof parsed.activeTab === "string" && parsed.activeTab.trim()) {
-        setActiveTab(parsed.activeTab);
-      }
-      if (
-        parsed.matchesByAccount &&
-        typeof parsed.matchesByAccount === "object" &&
-        !Array.isArray(parsed.matchesByAccount)
-      ) {
-        setMatchesByAccount(mergeWellsFargoBucketIntoChecking(parsed.matchesByAccount));
-      }
-      statementCsvRowsByAccountRef.current = parseStoredStatementCsvRows(
-        parsed.statementCsvRowsByAccount,
-      );
-    } catch {
-      // Ignore corrupted local storage and continue with empty in-memory state.
     }
+
+    void loadFromNeon();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
     setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking(prev));
   }, [matchesByAccount[LEGACY_WF_PROFILE_BUCKET]?.length]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const payload = {
-      selectedAccount,
-      activeTab,
-      matchesByAccount,
-      statementCsvRowsByAccount: statementCsvRowsByAccountRef.current,
-    };
-    try {
-      window.localStorage.setItem(RECONCILE_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // Ignore storage quota/security errors; page still works in-memory.
-    }
-  }, [activeTab, matchesByAccount, selectedAccount]);
+  // localStorage persistence removed — Neon is the source of truth for matchesByAccount and CSV rows.
 
   useEffect(() => {
     let cancelled = false;
@@ -1854,6 +1913,16 @@ export default function ReconcilePage() {
 
     setProcessedHashes(new Set(processedList.map((h) => String(h))));
     setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking({ ...prev, ...nextMatches }));
+
+    // Persist updated match results to Neon (replace mode per account).
+    for (const [accountName, matches] of Object.entries(nextMatches)) {
+      fetch("/api/reconciliation/match-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountName, matches, replace: true }),
+      }).catch(() => {});
+    }
+
     if (autoApprovalErrors.length > 0) {
       setActionError(autoApprovalErrors[0]);
     }
@@ -2530,9 +2599,6 @@ export default function ReconcilePage() {
         const err = await res.json().catch(() => ({ error: res.statusText }));
         throw new Error(err.error || `Reset failed (${res.status})`);
       }
-      if (typeof window !== "undefined") {
-        window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
-      }
       setMatchesByAccount({});
       statementCsvRowsByAccountRef.current = {};
       setProcessedHashes(new Set());
@@ -3092,6 +3158,19 @@ export default function ReconcilePage() {
             [selectedAccount]: mergeMatchArrays(prev[selectedAccount], data.matches),
           }),
         );
+
+        // Persist CSV rows + match results to Neon (non-blocking, fire-and-forget).
+        fetch("/api/reconciliation/csv-rows", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountName: selectedAccount, rows: mergedCsv }),
+        }).catch(() => {});
+        fetch("/api/reconciliation/match-cache", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountName: selectedAccount, matches: data.matches }),
+        }).catch(() => {});
+
         if (autoApprovedHashes.length > 0) {
           setProcessedHashes((prev) => {
             const next = new Set(prev);
@@ -3157,6 +3236,17 @@ export default function ReconcilePage() {
     (m) => !hasLinkedOrClaimedEntry(m, bankHashesWithNeonClaim),
   );
   const selectedAccountUploadedFiles = uploadedFilesByAccount[selectedAccount] ?? [];
+
+  if (neonStateLoading) {
+    return (
+      <DashboardLayout>
+        <div className="flex items-center justify-center py-32">
+          <Loader2 className="h-8 w-8 animate-spin text-accent" />
+          <span className="ml-3 text-gray-400 text-lg">Loading reconciliation data…</span>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
