@@ -684,10 +684,14 @@ export default function ReconcilePage() {
                     );
                   }
                 }
-                await Promise.all(migrationPromises);
+                const migrationResults = await Promise.all(migrationPromises);
+                const allSucceeded = migrationResults.every((r) => r.ok);
 
                 if (cancelled) return;
-                window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
+
+                if (allSucceeded) {
+                  window.localStorage.removeItem(RECONCILE_STORAGE_KEY);
+                }
 
                 neonMatches = localMatches;
                 neonCsvRows = localCsv;
