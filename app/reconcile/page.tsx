@@ -490,7 +490,7 @@ function parseCsvFile(file: File): Promise<string[][]> {
   });
 }
 
-const NEON_SAVE_CHUNK_SIZE = 200;
+const NEON_SAVE_CHUNK_SIZE = 15;
 
 async function saveMatchCacheToNeon(
   accountName: string,
@@ -1962,12 +1962,16 @@ export default function ReconcilePage() {
     setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking({ ...prev, ...nextMatches }));
 
     // Persist updated match results to Neon (replace mode per account).
+    const rematchErrors: string[] = [];
     for (const [accountName, matches] of Object.entries(nextMatches)) {
       try {
         await saveMatchCacheToNeon(accountName, matches, true);
-      } catch {
-        // Non-fatal: data is in React state for this session.
+      } catch (e) {
+        rematchErrors.push(`${accountName}: ${e instanceof Error ? e.message : String(e)}`);
       }
+    }
+    if (rematchErrors.length > 0) {
+      setActionError(`Re-match data failed to save to cloud: ${rematchErrors.join("; ")}`);
     }
 
     if (autoApprovalErrors.length > 0) {
@@ -3206,12 +3210,20 @@ export default function ReconcilePage() {
           }),
         );
 
-        // Persist CSV rows + match results to Neon.
+        // Persist CSV rows + match results to Neon (independent so one failure doesn't block the other).
+        const neonErrors: string[] = [];
         try {
           await saveMatchCacheToNeon(selectedAccount, data.matches);
+        } catch (e) {
+          neonErrors.push(`match-cache: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        try {
           await saveCsvRowsToNeon(selectedAccount, mergedCsv);
-        } catch {
-          // Non-fatal: data is in React state for this session; will retry on next upload.
+        } catch (e) {
+          neonErrors.push(`csv-rows: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (neonErrors.length > 0) {
+          setUploadError(`Data is shown but failed to save to cloud: ${neonErrors.join("; ")}`);
         }
 
         if (autoApprovedHashes.length > 0) {
