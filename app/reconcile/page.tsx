@@ -5,6 +5,7 @@ import { useDropzone } from "react-dropzone";
 import Papa from "papaparse";
 import { Ban, Check, Filter, Link2Off, Loader2, PlusCircle, Search, Upload, X } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import GlassDropdown, { type GlassDropdownOption } from "@/components/GlassDropdown";
 import {
   getExpenses,
   getTransfers,
@@ -159,6 +160,12 @@ const ACCOUNT_OPTIONS: AccountOption[] = [
   "Ally",
 ];
 const ALL_ACCOUNTS_OPTION = "All";
+
+const ACCOUNT_DROPDOWN_OPTIONS: GlassDropdownOption[] = [
+  { value: ALL_ACCOUNTS_OPTION, label: ALL_ACCOUNTS_OPTION },
+  ...ACCOUNT_OPTIONS.map((a) => ({ value: a, label: a })),
+];
+
 const CSV_PARSER_READY_ACCOUNTS = new Set<AccountOption>([
   "WF Checking",
   "WF Savings",
@@ -3324,10 +3331,9 @@ export default function ReconcilePage() {
               Set Statement Ending Balance
             </button>
             <label className="text-sm text-gray-300">Account</label>
-            <select
+            <GlassDropdown
               value={viewMode === "home" ? ALL_ACCOUNTS_OPTION : selectedAccount}
-              onChange={(e) => {
-                const nextValue = e.target.value;
+              onChange={(nextValue) => {
                 if (nextValue === ALL_ACCOUNTS_OPTION) {
                   setViewMode("home");
                   return;
@@ -3337,15 +3343,10 @@ export default function ReconcilePage() {
                 setActiveTab(account);
                 setViewMode("accountDetail");
               }}
-              className="px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-            >
-              <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
-              {ACCOUNT_OPTIONS.map((account) => (
-                <option key={account} value={account}>
-                  {account}
-                </option>
-              ))}
-            </select>
+              options={ACCOUNT_DROPDOWN_OPTIONS}
+              className="min-w-[10rem]"
+              aria-label="Account"
+            />
           </div>
         </div>
 
@@ -3439,21 +3440,16 @@ export default function ReconcilePage() {
                     <label htmlFor="home-account-filter" className="text-xs text-gray-400 whitespace-nowrap">
                       Account
                     </label>
-                    <select
+                    <GlassDropdown
                       id="home-account-filter"
                       value={homeAccountFilter}
-                      onChange={(e) =>
-                        setHomeAccountFilter(e.target.value as AccountOption | typeof ALL_ACCOUNTS_OPTION)
+                      onChange={(v) =>
+                        setHomeAccountFilter(v as AccountOption | typeof ALL_ACCOUNTS_OPTION)
                       }
-                      className="px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none min-w-[10rem]"
-                    >
-                      <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
-                      {ACCOUNT_OPTIONS.map((account) => (
-                        <option key={account} value={account}>
-                          {account}
-                        </option>
-                      ))}
-                    </select>
+                      options={ACCOUNT_DROPDOWN_OPTIONS}
+                      className="min-w-[10rem]"
+                      aria-label="Filter by account"
+                    />
                   </div>
                 </div>
               </div>
@@ -4766,25 +4762,20 @@ export default function ReconcilePage() {
                   <label htmlFor="user-claim-account-filter" className="text-xs text-gray-400 whitespace-nowrap">
                     Account
                   </label>
-                  <select
+                  <GlassDropdown
                     id="user-claim-account-filter"
                     value={userStatementClaimModal.accountFilter}
-                    onChange={(e) =>
+                    onChange={(v) =>
                       setUserStatementClaimModal((prev) => ({
                         ...prev,
-                        accountFilter: e.target.value as AccountOption | typeof ALL_ACCOUNTS_OPTION,
+                        accountFilter: v as AccountOption | typeof ALL_ACCOUNTS_OPTION,
                         error: "",
                       }))
                     }
-                    className="px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none min-w-[10rem]"
-                  >
-                    <option value={ALL_ACCOUNTS_OPTION}>{ALL_ACCOUNTS_OPTION}</option>
-                    {ACCOUNT_OPTIONS.map((account) => (
-                      <option key={account} value={account}>
-                        {account}
-                      </option>
-                    ))}
-                  </select>
+                    options={ACCOUNT_DROPDOWN_OPTIONS}
+                    className="min-w-[10rem]"
+                    aria-label="Filter statement lines by account"
+                  />
                 </div>
               </div>
               <div className="max-h-[40vh] overflow-auto rounded-md border border-charcoal-dark bg-charcoal">

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
+import GlassDropdown from "@/components/GlassDropdown";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { submitExpense } from "@/services/sheetsApi";
 import { EXPENSE_TYPE_OPTIONS } from "@/lib/constants";
@@ -57,20 +58,15 @@ export default function NewExpensePage() {
               <label htmlFor="expenseType" className="block text-sm font-medium text-gray-300 mb-1">
                 Expense Type
               </label>
-              <select
+              <GlassDropdown
                 id="expenseType"
-                required
                 value={expenseType}
-                onChange={(e) => setExpenseType(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-              >
-                <option value="">Select type</option>
-                {EXPENSE_TYPE_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
-                ))}
-              </select>
+                onChange={setExpenseType}
+                options={EXPENSE_TYPE_OPTIONS.map((opt) => ({ value: opt, label: opt }))}
+                placeholder="Select type"
+                className="w-full"
+                aria-label="Expense type"
+              />
             </div>
 
             <div>

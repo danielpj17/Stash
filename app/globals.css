@@ -25,4 +25,23 @@ body {
     scrollbar-width: thin;
     scrollbar-color: var(--charcoal-light) var(--charcoal);
   }
+
+  /** Light thumb on translucent dark panels (glass dropdowns). */
+  .scrollbar-glass {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+  }
+
+  .scrollbar-glass::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-glass::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-glass::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
+    border-radius: 3px;
+  }
 }

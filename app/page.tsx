@@ -5,6 +5,7 @@ import Link from "next/link";
 import { X, Save, PlusCircle, Loader2, Plus, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import MonthDropdown from "@/components/MonthDropdown";
+import GlassDropdown from "@/components/GlassDropdown";
 import { useMonth } from "@/contexts/MonthContext";
 import { useRefresh } from "@/contexts/RefreshContext";
 import { useExpensesData } from "@/contexts/ExpensesDataContext";
@@ -12,7 +13,14 @@ import { rowMatchesMonth, transferMatchesMonth, submitTransfer } from "@/service
 import type { SheetRow } from "@/services/sheetsApi";
 import { getLatestSnaptradeBalances, refreshSnaptradeBalances } from "@/services/snaptradeApi";
 import type { SupportedBroker, RefreshSnaptradeBalancesResponse } from "@/services/snaptradeApi";
-import { EXPENSE_CATEGORIES, CATEGORY_COLORS, BUDGET_STORAGE_KEY } from "@/lib/constants";
+import {
+  EXPENSE_CATEGORIES,
+  CATEGORY_COLORS,
+  BUDGET_STORAGE_KEY,
+  LEGACY_EXPENSE_CATEGORY_ALIASES,
+  normalizeExpenseCategoryType,
+} from "@/lib/constants";
+import { migrateBudgetCategoryKeys } from "@/lib/budgetCategoryMigration";
 import {
   computeAccountBalances,
   getAccountAnchors,
@@ -83,8 +91,9 @@ function buildExpenseTotals(rows: SheetRow[]): { category: string; total: number
   const byCategory: Record<string, number> = {};
   EXPENSE_CATEGORIES.forEach((cat) => (byCategory[cat] = 0));
   rows.forEach((r) => {
-    if (r.expenseType !== "Income" && byCategory[r.expenseType] !== undefined) {
-      byCategory[r.expenseType] += r.amount;
+    const cat = normalizeExpenseCategoryType(r.expenseType);
+    if (cat !== "Income" && byCategory[cat] !== undefined) {
+      byCategory[cat] += r.amount;
     }
   });
   return EXPENSE_CATEGORIES.map((cat) => ({
@@ -272,6 +281,15 @@ const TRANSFER_TO_OPTIONS = [
   "Misc.",
 ] as const;
 
+const TRANSFER_FROM_DROPDOWN_OPTIONS = TRANSFER_FROM_OPTIONS.map((opt) => ({
+  value: opt,
+  label: opt,
+}));
+const TRANSFER_TO_DROPDOWN_OPTIONS = TRANSFER_TO_OPTIONS.map((opt) => ({
+  value: opt,
+  label: opt,
+}));
+
 const gridStroke = "rgba(255,255,255,0.06)";
 const axisStroke = "#9ca3af";
 
@@ -339,10 +357,16 @@ export default function BudgetPage() {
                   const v = parsed[cat];
                   if (typeof v === "number") goals[cat] = v;
                 });
+                for (const [oldName, newName] of Object.entries(LEGACY_EXPENSE_CATEGORY_ALIASES)) {
+                  const v = parsed[oldName];
+                  if (typeof v === "number") {
+                    goals[newName] = (goals[newName] ?? 0) + v;
+                  }
+                }
                 toSave = {};
                 for (let m = 1; m <= 12; m++) toSave[String(m)] = { ...goals };
               } else {
-                toSave = parsed as MonthlyBudgets;
+                toSave = migrateBudgetCategoryKeys(parsed as MonthlyBudgets);
               }
               const res = await fetch("/api/budget", {
                 method: "PUT",
@@ -435,7 +459,7 @@ export default function BudgetPage() {
   const categoryTransactions = useMemo(() => {
     if (!selectedCategory) return [];
     return rows
-      .filter((r) => r.expenseType === selectedCategory)
+      .filter((r) => normalizeExpenseCategoryType(r.expenseType) === selectedCategory)
       .sort((a, b) => {
         const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
         const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
@@ -771,32 +795,22 @@ export default function BudgetPage() {
                     {showTransferForm && (
                       <div className="mx-2 mb-3 p-3 rounded-lg bg-[#1e1e1e] border border-charcoal-dark space-y-2">
                         <div className="flex flex-col sm:flex-row gap-2">
-                          <select
+                          <GlassDropdown
                             value={tfFrom}
-                            onChange={(e) => setTfFrom(e.target.value)}
-                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                            onChange={setTfFrom}
+                            options={TRANSFER_FROM_DROPDOWN_OPTIONS}
+                            placeholder="From…"
+                            className="flex-1 min-w-0"
                             aria-label="Transfer from"
-                          >
-                            <option value="">From…</option>
-                            {TRANSFER_FROM_OPTIONS.map((opt) => (
-                              <option key={opt} value={opt}>
-                                {opt}
-                              </option>
-                            ))}
-                          </select>
-                          <select
+                          />
+                          <GlassDropdown
                             value={tfTo}
-                            onChange={(e) => setTfTo(e.target.value)}
-                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+                            onChange={setTfTo}
+                            options={TRANSFER_TO_DROPDOWN_OPTIONS}
+                            placeholder="To…"
+                            className="flex-1 min-w-0"
                             aria-label="Transfer to"
-                          >
-                            <option value="">To…</option>
-                            {TRANSFER_TO_OPTIONS.map((opt) => (
-                              <option key={opt} value={opt}>
-                                {opt}
-                              </option>
-                            ))}
-                          </select>
+                          />
                           <input
                             type="text"
                             inputMode="decimal"

@@ -13,9 +13,19 @@ export const EXPENSE_CATEGORIES = [
   "Tithing",
   "Investments",
   "Gifts",
-  "Beauty",
+  "Personal Care",
   "Subscriptions",
 ] as const;
+
+/** Old sheet/category names → current EXPENSE_CATEGORIES keys (budget migration). */
+export const LEGACY_EXPENSE_CATEGORY_ALIASES: Record<string, string> = {
+  Beauty: "Personal Care",
+};
+
+/** Map legacy sheet "Expense Type" values to current category names for totals and filters. */
+export function normalizeExpenseCategoryType(expenseType: string): string {
+  return LEGACY_EXPENSE_CATEGORY_ALIASES[expenseType] ?? expenseType;
+}
 
 // Expense Type dropdown: categories + Income
 export const EXPENSE_TYPE_OPTIONS = [...EXPENSE_CATEGORIES, "Income"] as const;
@@ -34,7 +44,7 @@ export const PIE_COLORS = [
   "#ffffcc", // light yellow
   "#4EA8FF", // blue (Investments)
   "#E91E63", // pink (Gifts)
-  "#00ACC1", // cyan (Beauty)
+  "#00ACC1", // cyan (Personal Care)
   "#A1887F", // warm gray-brown (Subscriptions)
 ];
 

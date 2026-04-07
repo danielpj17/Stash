@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import {
+  migrateBudgetCategoryKeys,
+  type MonthlyBudgets,
+} from "@/lib/budgetCategoryMigration";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** Stored shape: { "1": { "Groceries": 500 }, ... } — only months that have been saved */
-type MonthlyBudgets = Record<string, Record<string, number>>;
 
 function isValidMonthKey(k: string): boolean {
   const n = parseInt(k, 10);
@@ -37,8 +38,16 @@ export async function GET() {
   try {
     const sql = neon(connectionString);
     const rows = await sql`SELECT data FROM budget_store WHERE id = 1`;
-    const data = rows[0]?.data ?? {};
-    return NextResponse.json(typeof data === "object" && data !== null ? data : {});
+    const raw = rows[0]?.data ?? {};
+    const base =
+      typeof raw === "object" && raw !== null && !Array.isArray(raw)
+        ? (raw as MonthlyBudgets)
+        : {};
+    const data = migrateBudgetCategoryKeys(base);
+    if (data !== base) {
+      await sql`INSERT INTO budget_store (id, data) VALUES (1, ${data}) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data`;
+    }
+    return NextResponse.json(data);
   } catch (err) {
     console.error("Budget GET error:", err);
     return NextResponse.json(
@@ -62,10 +71,11 @@ export async function PUT(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const data = normalizeBody(body);
-  if (data === null) {
+  const normalized = normalizeBody(body);
+  if (normalized === null) {
     return NextResponse.json({ error: "Invalid budget data" }, { status: 400 });
   }
+  const data = migrateBudgetCategoryKeys(normalized);
   try {
     const sql = neon(connectionString);
     await sql`INSERT INTO budget_store (id, data) VALUES (1, ${data}) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data`;
