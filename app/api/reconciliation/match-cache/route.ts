@@ -42,7 +42,11 @@ export async function GET() {
       const account = String(row.account_name ?? "").trim();
       if (!account) continue;
       if (!matchesByAccount[account]) matchesByAccount[account] = [];
-      matchesByAccount[account].push(row.match_data);
+      const matchData = row.match_data as Record<string, any>;
+      if (matchData?.bankTransaction && typeof matchData.bankTransaction === "object") {
+        matchData.bankTransaction.accountName = account;
+      }
+      matchesByAccount[account].push(matchData);
     }
 
     return NextResponse.json({ matchesByAccount });
