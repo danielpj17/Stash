@@ -16,6 +16,7 @@ export const TRANSFER_LABEL_TO_BALANCE_KEY: Record<string, string> = {
   Ally: "Ally",
   "Capital One": "Capital One",
   "America First": "America First",
+  Discover: "Discover",
 };
 
 /**
@@ -34,6 +35,7 @@ export const BASE_ACCOUNT_BALANCES: Record<string, number> = {
   Ally: 0,
   "Capital One": 0,
   "America First": 0,
+  Discover: 0,
 };
 
 const LIVE_BROKER_ACCOUNT_KEYS: SupportedBroker[] = [

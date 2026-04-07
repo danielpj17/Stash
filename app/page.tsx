@@ -250,6 +250,7 @@ const TRANSFER_FROM_OPTIONS = [
   "Ally",
   "Capital One",
   "America First",
+  "Discover",
   "Parents",
   "Cash",
 ] as const;
@@ -266,6 +267,7 @@ const TRANSFER_TO_OPTIONS = [
   "Ally",
   "Capital One",
   "America First",
+  "Discover",
   "Cash",
   "Misc.",
 ] as const;
