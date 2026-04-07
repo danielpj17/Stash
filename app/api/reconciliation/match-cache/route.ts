@@ -3,6 +3,11 @@ import { neon } from "@neondatabase/serverless";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204 });
+}
 
 type MatchCacheRow = {
   account_name: string;

@@ -490,6 +490,55 @@ function parseCsvFile(file: File): Promise<string[][]> {
   });
 }
 
+const NEON_SAVE_CHUNK_SIZE = 200;
+
+async function saveMatchCacheToNeon(
+  accountName: string,
+  matches: MatchResult[],
+  replace = false,
+): Promise<void> {
+  if (matches.length <= NEON_SAVE_CHUNK_SIZE) {
+    const res = await fetch("/api/reconciliation/match-cache", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountName, matches, replace }),
+    });
+    if (!res.ok) throw new Error(`match-cache save failed (${res.status})`);
+    return;
+  }
+  for (let i = 0; i < matches.length; i += NEON_SAVE_CHUNK_SIZE) {
+    const chunk = matches.slice(i, i + NEON_SAVE_CHUNK_SIZE);
+    const isFirst = i === 0;
+    const res = await fetch("/api/reconciliation/match-cache", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountName, matches: chunk, replace: replace && isFirst }),
+    });
+    if (!res.ok) throw new Error(`match-cache save failed (${res.status})`);
+  }
+}
+
+async function saveCsvRowsToNeon(accountName: string, rows: string[][]): Promise<void> {
+  if (rows.length <= NEON_SAVE_CHUNK_SIZE) {
+    const res = await fetch("/api/reconciliation/csv-rows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountName, rows }),
+    });
+    if (!res.ok) throw new Error(`csv-rows save failed (${res.status})`);
+    return;
+  }
+  for (let i = 0; i < rows.length; i += NEON_SAVE_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + NEON_SAVE_CHUNK_SIZE);
+    const res = await fetch("/api/reconciliation/csv-rows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountName, rows: chunk }),
+    });
+    if (!res.ok) throw new Error(`csv-rows save failed (${res.status})`);
+  }
+}
+
 export default function ReconcilePage() {
   const [selectedAccount, setSelectedAccount] = useState<AccountOption>("WF Checking");
   const [isUploading, setIsUploading] = useState(false);
@@ -661,31 +710,25 @@ export default function ReconcilePage() {
               const hasLocalData = Object.values(localMatches).some((arr) => arr.length > 0);
 
               if (hasLocalData) {
-                const migrationPromises: Promise<Response>[] = [];
+                let allSucceeded = true;
                 for (const [accountName, matches] of Object.entries(localMatches)) {
                   if (matches.length > 0) {
-                    migrationPromises.push(
-                      fetch("/api/reconciliation/match-cache", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ accountName, matches }),
-                      }),
-                    );
+                    try {
+                      await saveMatchCacheToNeon(accountName, matches);
+                    } catch {
+                      allSucceeded = false;
+                    }
                   }
                 }
                 for (const [accountName, rows] of Object.entries(localCsv)) {
                   if (rows.length > 0) {
-                    migrationPromises.push(
-                      fetch("/api/reconciliation/csv-rows", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ accountName, rows }),
-                      }),
-                    );
+                    try {
+                      await saveCsvRowsToNeon(accountName, rows);
+                    } catch {
+                      allSucceeded = false;
+                    }
                   }
                 }
-                const migrationResults = await Promise.all(migrationPromises);
-                const allSucceeded = migrationResults.every((r) => r.ok);
 
                 if (cancelled) return;
 
@@ -1920,11 +1963,11 @@ export default function ReconcilePage() {
 
     // Persist updated match results to Neon (replace mode per account).
     for (const [accountName, matches] of Object.entries(nextMatches)) {
-      fetch("/api/reconciliation/match-cache", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountName, matches, replace: true }),
-      }).catch(() => {});
+      try {
+        await saveMatchCacheToNeon(accountName, matches, true);
+      } catch {
+        // Non-fatal: data is in React state for this session.
+      }
     }
 
     if (autoApprovalErrors.length > 0) {
@@ -3163,17 +3206,13 @@ export default function ReconcilePage() {
           }),
         );
 
-        // Persist CSV rows + match results to Neon (non-blocking, fire-and-forget).
-        fetch("/api/reconciliation/csv-rows", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ accountName: selectedAccount, rows: mergedCsv }),
-        }).catch(() => {});
-        fetch("/api/reconciliation/match-cache", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ accountName: selectedAccount, matches: data.matches }),
-        }).catch(() => {});
+        // Persist CSV rows + match results to Neon.
+        try {
+          await saveMatchCacheToNeon(selectedAccount, data.matches);
+          await saveCsvRowsToNeon(selectedAccount, mergedCsv);
+        } catch {
+          // Non-fatal: data is in React state for this session; will retry on next upload.
+        }
 
         if (autoApprovedHashes.length > 0) {
           setProcessedHashes((prev) => {
