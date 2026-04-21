@@ -55,14 +55,26 @@ export default function GlassDropdown({
 
   useEffect(() => {
     if (!open || !buttonRef.current) return;
-    const rect = buttonRef.current.getBoundingClientRect();
-    setPanelStyle({
-      position: "fixed",
-      top: rect.bottom + 4,
-      left: rect.left,
-      width: rect.width,
-      zIndex: 9999,
-    });
+
+    function recalculate() {
+      const rect = buttonRef.current!.getBoundingClientRect();
+      setPanelStyle({
+        position: "fixed",
+        top: rect.bottom + 4,
+        left: rect.left,
+        width: rect.width,
+        maxHeight: Math.max(80, window.innerHeight - rect.bottom - 8),
+        zIndex: 9999,
+      });
+    }
+
+    recalculate();
+    window.addEventListener("scroll", recalculate, { passive: true, capture: true });
+    window.addEventListener("resize", recalculate, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", recalculate, { capture: true });
+      window.removeEventListener("resize", recalculate);
+    };
   }, [open]);
 
   const selected = options.find((o) => o.value === value);
@@ -110,7 +122,7 @@ export default function GlassDropdown({
           role="listbox"
           style={panelStyle}
           className={`
-            max-h-[min(320px,70vh)] overflow-y-auto scrollbar-glass
+            overflow-y-auto scrollbar-glass
             rounded-2xl border border-white/10 bg-neutral-900/75 backdrop-blur-xl
             shadow-[0_16px_48px_rgba(0,0,0,0.45)]
             divide-y divide-white/[0.08]
