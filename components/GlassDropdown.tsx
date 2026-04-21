@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 
 export type GlassDropdownOption = { value: string; label: string };
@@ -33,7 +34,9 @@ export default function GlassDropdown({
   leadingIcon,
 }: GlassDropdownProps) {
   const [open, setOpen] = useState(false);
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({});
   const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -50,6 +53,18 @@ export default function GlassDropdown({
     };
   }, []);
 
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPanelStyle({
+      position: "fixed",
+      top: rect.bottom + 4,
+      left: rect.left,
+      width: rect.width,
+      zIndex: 9999,
+    });
+  }, [open]);
+
   const selected = options.find((o) => o.value === value);
   const displayLabel = selected?.label ?? (value ? value : placeholder);
   const showPlaceholder = !selected && (!value || value === "");
@@ -58,6 +73,7 @@ export default function GlassDropdown({
     <div className={`relative ${className}`} ref={ref}>
       <button
         id={id}
+        ref={buttonRef}
         type="button"
         disabled={disabled}
         onClick={() => !disabled && setOpen((o) => !o)}
@@ -89,11 +105,11 @@ export default function GlassDropdown({
         />
       </button>
 
-      {open && (
+      {open && typeof document !== "undefined" && createPortal(
         <ul
           role="listbox"
+          style={panelStyle}
           className={`
-            absolute left-0 right-0 top-full z-50 mt-1 w-full
             max-h-[min(320px,70vh)] overflow-y-auto scrollbar-glass
             rounded-2xl border border-white/10 bg-neutral-900/75 backdrop-blur-xl
             shadow-[0_16px_48px_rgba(0,0,0,0.45)]
@@ -121,7 +137,8 @@ export default function GlassDropdown({
               </li>
             );
           })}
-        </ul>
+        </ul>,
+        document.body
       )}
     </div>
   );
