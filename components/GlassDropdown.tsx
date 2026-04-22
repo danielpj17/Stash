@@ -37,10 +37,14 @@ export default function GlassDropdown({
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({});
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (
+        ref.current && !ref.current.contains(e.target as Node) &&
+        panelRef.current && !panelRef.current.contains(e.target as Node)
+      ) setOpen(false);
     }
     function handleEscape(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -119,6 +123,7 @@ export default function GlassDropdown({
 
       {open && typeof document !== "undefined" && createPortal(
         <ul
+          ref={panelRef}
           role="listbox"
           style={panelStyle}
           className={`
