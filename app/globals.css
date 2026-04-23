@@ -20,6 +20,19 @@ body {
   outline: none;
 }
 
+/* Cross-browser range input styling for investment calculator sliders */
+input[type="range"] {
+  @apply appearance-none h-2 rounded-full cursor-pointer;
+  accent-color: #50C878;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  @apply h-2 rounded-full bg-charcoal-dark;
+}
+input[type="range"]::-moz-range-track {
+  @apply h-2 rounded-full;
+  background-color: #333333;
+}
+
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;

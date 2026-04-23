@@ -59,6 +59,7 @@ Pages use `useMemo` to filter the cached full-year data by `selectedMonth` — m
 | `lib/constants.ts` | Expense categories, account names, transfer options |
 | `lib/budgetCategoryMigration.ts` | Normalizes legacy category names during budget load |
 | `components/GlassDropdown.tsx` | Reusable styled dropdown used across pages |
+| `app/investment-calculator/page.tsx` | Life-stage compound-interest calculator — fully client-side, persists to localStorage, uses Recharts |
 
 ### Budget Logic
 

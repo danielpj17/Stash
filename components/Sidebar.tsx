@@ -8,6 +8,7 @@ import {
   TrendingUp,
   ClipboardCheck,
   Menu,
+  BarChart2,
 } from "lucide-react";
 import { useSidebar } from "@/contexts/SidebarContext";
 import StashLogo from "./StashLogo";
@@ -17,6 +18,7 @@ const navItems = [
   { href: "/", label: "Budget", icon: PiggyBank },
   { href: "/net-worth", label: "Net Worth", icon: TrendingUp },
   { href: "/reconcile", label: "Reconcile", icon: ClipboardCheck },
+  { href: "/investment-calculator", label: "Life-Stage Planner", icon: BarChart2 },
 ];
 
 export default function Sidebar() {
