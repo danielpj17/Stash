@@ -18,8 +18,19 @@ const sizes = [
 const svgContent = readFileSync(svgPath);
 
 for (const { name, size } of sizes) {
+  const logoSize = Math.round(size * 0.62);
+  const padStart = Math.round((size - logoSize) / 2);
+  const padEnd = size - logoSize - padStart;
+
   await sharp(svgContent)
-    .resize(size, size)
+    .resize(logoSize, logoSize)
+    .extend({
+      top: padStart,
+      bottom: padEnd,
+      left: padStart,
+      right: padEnd,
+      background: "#282828",
+    })
     .flatten({ background: "#282828" })
     .png()
     .toFile(join(outputDir, name));

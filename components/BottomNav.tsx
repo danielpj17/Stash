@@ -39,7 +39,7 @@ export default function BottomNav() {
               isActive ? "text-[#50C878]" : "text-gray-400 hover:text-gray-200"
             }`}
           >
-            <Icon className="w-6 h-6" />
+            <Icon className="w-7 h-7" />
           </Link>
         );
       })}

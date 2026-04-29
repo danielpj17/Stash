@@ -11,6 +11,7 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <main
         className={`flex-1 flex flex-col min-w-0 pl-0 ${collapsed ? "lg:pl-[72px]" : "lg:pl-64"} standalone:!pl-0`}
+        style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}
       >
         <div className="lg:hidden standalone:hidden flex items-center p-2 border-b border-charcoal-dark shrink-0">
           <button
