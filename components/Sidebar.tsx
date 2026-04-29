@@ -42,6 +42,7 @@ export default function Sidebar() {
           flex flex-col
           w-64
           lg:translate-x-0
+          standalone:hidden
           ${collapsed ? "lg:w-[72px]" : "lg:w-64"}
           ${mobileOpen ? "max-lg:translate-x-0" : "max-lg:-translate-x-full"}
         `}

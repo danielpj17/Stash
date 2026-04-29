@@ -2,6 +2,7 @@
 
 import { Menu } from "lucide-react";
 import Sidebar from "./Sidebar";
+import BottomNav from "./BottomNav";
 import { SidebarProvider, useSidebar } from "@/contexts/SidebarContext";
 function DashboardContent({ children }: { children: React.ReactNode }) {
   const { collapsed, toggleMobile } = useSidebar();
@@ -9,9 +10,9 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen flex">
       <Sidebar />
       <main
-        className={`flex-1 flex flex-col min-w-0 pl-0 ${collapsed ? "lg:pl-[72px]" : "lg:pl-64"}`}
+        className={`flex-1 flex flex-col min-w-0 pl-0 ${collapsed ? "lg:pl-[72px]" : "lg:pl-64"} standalone:!pl-0`}
       >
-        <div className="lg:hidden flex items-center p-2 border-b border-charcoal-dark shrink-0">
+        <div className="lg:hidden standalone:hidden flex items-center p-2 border-b border-charcoal-dark shrink-0">
           <button
             type="button"
             onClick={toggleMobile}
@@ -21,8 +22,9 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
             <Menu className="w-5 h-5" />
           </button>
         </div>
-        <div className="flex-1 p-4 md:p-6 overflow-auto">{children}</div>
+        <div className="flex-1 p-4 md:p-6 overflow-auto standalone:pb-24">{children}</div>
       </main>
+      <BottomNav />
     </div>
   );
 }
