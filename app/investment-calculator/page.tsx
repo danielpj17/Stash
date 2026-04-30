@@ -640,6 +640,35 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
 
 // ─── ProjectionChart ──────────────────────────────────────────────────────────
 
+function StageLabel({
+  viewBox,
+  label,
+  color,
+}: {
+  viewBox?: { x: number; y: number; width: number; height: number };
+  label: string;
+  color: string;
+}) {
+  if (!viewBox) return null;
+  const { x, y } = viewBox;
+  const px = x + 10;
+  const py = y + 12;
+  return (
+    <text
+      x={px}
+      y={py}
+      transform={`rotate(-90, ${px}, ${py})`}
+      textAnchor="end"
+      fill={color}
+      fillOpacity={0.5}
+      fontSize={10}
+      fontWeight={500}
+    >
+      {label}
+    </text>
+  );
+}
+
 interface ProjectionChartProps {
   result: ProjectionResult | null;
   stages: LifeStage[];
@@ -655,23 +684,24 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
     );
   }
 
-  const totalSpan = stages.length > 0
-    ? stages[stages.length - 1].endAge - stages[0].startAge
-    : 1;
-
   return (
-    <div>
-      <ResponsiveContainer width="100%" height={360}>
-        <LineChart data={result.dataPoints} margin={{ top: 16, right: 16, bottom: 8, left: 12 }}>
-          {stages.map((s, i) => (
-            <ReferenceArea
-              key={s.id}
-              x1={s.startAge}
-              x2={s.endAge}
-              fill={STAGE_COLORS[i % STAGE_COLORS.length]}
-              fillOpacity={0.07}
-            />
-          ))}
+    <ResponsiveContainer width="100%" height={360}>
+      <LineChart data={result.dataPoints} margin={{ top: 16, right: 16, bottom: 8, left: 12 }}>
+        {stages.map((s, i) => (
+          <ReferenceArea
+            key={s.id}
+            x1={s.startAge}
+            x2={s.endAge}
+            fill={STAGE_COLORS[i % STAGE_COLORS.length]}
+            fillOpacity={0.07}
+            label={
+              <StageLabel
+                label={s.label}
+                color={STAGE_COLORS[i % STAGE_COLORS.length]}
+              />
+            }
+          />
+        ))}
 
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
 
@@ -728,26 +758,7 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
           animationDuration={400}
         />
       </LineChart>
-      </ResponsiveContainer>
-
-      {/* Proportional stage label bar */}
-      <div className="flex mt-1" style={{ paddingLeft: 74, paddingRight: 16 }}>
-        {stages.map((s, i) => {
-          const pct = ((s.endAge - s.startAge) / totalSpan) * 100;
-          const color = STAGE_COLORS[i % STAGE_COLORS.length];
-          return (
-            <div
-              key={s.id}
-              className="flex items-center justify-center overflow-hidden px-1 py-0.5 text-[10px] font-medium rounded-sm border-r border-charcoal-dark last:border-r-0"
-              style={{ width: `${pct}%`, color, backgroundColor: `${color}18` }}
-              title={s.label}
-            >
-              <span className="truncate">{s.label}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    </ResponsiveContainer>
   );
 }
 
