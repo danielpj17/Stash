@@ -655,25 +655,23 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
     );
   }
 
+  const totalSpan = stages.length > 0
+    ? stages[stages.length - 1].endAge - stages[0].startAge
+    : 1;
+
   return (
-    <ResponsiveContainer width="100%" height={360}>
-      <LineChart data={result.dataPoints} margin={{ top: 28, right: 16, bottom: 8, left: 12 }}>
-        {stages.map((s, i) => (
-          <ReferenceArea
-            key={s.id}
-            x1={s.startAge}
-            x2={s.endAge}
-            fill={STAGE_COLORS[i % STAGE_COLORS.length]}
-            fillOpacity={0.07}
-            label={{
-              value: s.label,
-              position: "insideTopLeft",
-              fill: "#9ca3af",
-              fontSize: 10,
-              dy: -14,
-            }}
-          />
-        ))}
+    <div>
+      <ResponsiveContainer width="100%" height={360}>
+        <LineChart data={result.dataPoints} margin={{ top: 16, right: 16, bottom: 8, left: 12 }}>
+          {stages.map((s, i) => (
+            <ReferenceArea
+              key={s.id}
+              x1={s.startAge}
+              x2={s.endAge}
+              fill={STAGE_COLORS[i % STAGE_COLORS.length]}
+              fillOpacity={0.07}
+            />
+          ))}
 
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
 
@@ -730,7 +728,26 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
           animationDuration={400}
         />
       </LineChart>
-    </ResponsiveContainer>
+      </ResponsiveContainer>
+
+      {/* Proportional stage label bar */}
+      <div className="flex mt-1" style={{ paddingLeft: 74, paddingRight: 16 }}>
+        {stages.map((s, i) => {
+          const pct = ((s.endAge - s.startAge) / totalSpan) * 100;
+          const color = STAGE_COLORS[i % STAGE_COLORS.length];
+          return (
+            <div
+              key={s.id}
+              className="flex items-center justify-center overflow-hidden px-1 py-0.5 text-[10px] font-medium rounded-sm border-r border-charcoal-dark last:border-r-0"
+              style={{ width: `${pct}%`, color, backgroundColor: `${color}18` }}
+              title={s.label}
+            >
+              <span className="truncate">{s.label}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -948,22 +965,8 @@ export default function InvestmentCalculatorPage() {
         <MetricsCards result={result} />
 
         <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-visible">
-          <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl flex items-center justify-between">
+          <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl">
             <h2 className="text-white font-semibold">Portfolio Projection</h2>
-            <div className="flex items-center gap-4 text-xs text-gray-400">
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-0.5 bg-[#60a5fa] rounded inline-block" />
-                Nominal
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-0.5 bg-accent rounded inline-block" />
-                Real (Today&apos;s $)
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-0.5 bg-gray-400 rounded inline-block" style={{ backgroundImage: "repeating-linear-gradient(to right, #9ca3af 0, #9ca3af 4px, transparent 4px, transparent 7px)" }} />
-                Contributed
-              </span>
-            </div>
           </div>
           <div className="p-4">
             <ProjectionChart
