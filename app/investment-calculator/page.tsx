@@ -97,10 +97,12 @@ const STAGE_COLORS = ["#60a5fa", "#50C878", "#a78bfa", "#f59e0b", "#f87171", "#3
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function buildDefaultStages(currentAge: number, retirementAge: number): LifeStage[] {
+  const studentEnd = Math.max(currentAge + 3, 25);
+  const earlyEnd   = Math.max(studentEnd + 1, 30);
   return [
-    { id: "s1", label: "Student",      startAge: currentAge, endAge: 22,            amount: 50,   frequency: "Monthly" },
-    { id: "s2", label: "Early career", startAge: 22,         endAge: 30,            amount: 200,  frequency: "Monthly" },
-    { id: "s3", label: "Peak earning", startAge: 30,         endAge: retirementAge, amount: 1000, frequency: "Monthly" },
+    { id: "s1", label: "Student",      startAge: currentAge, endAge: studentEnd,    amount: 50,   frequency: "Monthly" },
+    { id: "s2", label: "Early career", startAge: studentEnd, endAge: earlyEnd,      amount: 200,  frequency: "Monthly" },
+    { id: "s3", label: "Peak earning", startAge: earlyEnd,   endAge: retirementAge, amount: 1000, frequency: "Monthly" },
   ];
 }
 
@@ -685,8 +687,8 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={360}>
-      <LineChart data={result.dataPoints} margin={{ top: 16, right: 16, bottom: 8, left: 12 }}>
+    <ResponsiveContainer width="100%" height={440}>
+      <LineChart data={result.dataPoints} margin={{ top: 16, right: 8, bottom: 8, left: 8 }}>
         {stages.map((s, i) => (
           <ReferenceArea
             key={s.id}
@@ -979,7 +981,7 @@ export default function InvestmentCalculatorPage() {
           <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl">
             <h2 className="text-white font-semibold">Portfolio Projection</h2>
           </div>
-          <div className="p-4">
+          <div className="p-2">
             <ProjectionChart
               result={result}
               stages={stages}
