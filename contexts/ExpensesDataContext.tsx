@@ -5,7 +5,6 @@ import {
   useContext,
   useState,
   useEffect,
-  useRef,
   type ReactNode,
 } from "react";
 import { useRefresh } from "@/contexts/RefreshContext";
@@ -21,29 +20,63 @@ type ExpensesDataContextType = {
 
 const ExpensesDataContext = createContext<ExpensesDataContextType | null>(null);
 
+const CACHE_KEY = "stash_expenses_v1";
+
+type CachedData = {
+  allRows: SheetRow[];
+  allTransfers: TransferRow[];
+};
+
+function readCache(): CachedData | null {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as CachedData;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(allRows: SheetRow[], allTransfers: TransferRow[]) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ allRows, allTransfers }));
+  } catch {
+    // localStorage full or unavailable — silently skip
+  }
+}
+
 /**
  * Fetches full-year expenses and transfers once (no month filter) and keeps them in memory.
  * Pages filter by selectedMonth client-side for instant month/page switching.
+ * On return visits, renders immediately from localStorage while revalidating in the background.
  */
 export function ExpensesDataProvider({ children }: { children: ReactNode }) {
   const { refreshKey } = useRefresh();
-  const [allRows, setAllRows] = useState<SheetRow[]>([]);
-  const [allTransfers, setAllTransfers] = useState<TransferRow[]>([]);
-  const [loading, setLoading] = useState(true);
+
+  const [allRows, setAllRows] = useState<SheetRow[]>(() => {
+    if (typeof window === "undefined") return [];
+    return readCache()?.allRows ?? [];
+  });
+  const [allTransfers, setAllTransfers] = useState<TransferRow[]>(() => {
+    if (typeof window === "undefined") return [];
+    return readCache()?.allTransfers ?? [];
+  });
+  const [loading, setLoading] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return readCache() === null;
+  });
   const [error, setError] = useState<string | null>(null);
-  const initialLoadDone = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    if (!initialLoadDone.current) {
-      setLoading(true);
-      setError(null);
-    }
+    setError(null);
+
     Promise.all([getExpenses(), getTransfers()])
       .then(([rows, transfers]) => {
         if (!cancelled) {
           setAllRows(rows);
           setAllTransfers(transfers);
+          writeCache(rows, transfers);
           setError(null);
         }
       })
@@ -51,10 +84,7 @@ export function ExpensesDataProvider({ children }: { children: ReactNode }) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
       })
       .finally(() => {
-        if (!cancelled) {
-          initialLoadDone.current = true;
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
