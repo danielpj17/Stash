@@ -16,6 +16,7 @@ import {
 import { EXPENSE_TYPE_OPTIONS } from "@/lib/constants";
 import { getLatestSnaptradeBalances } from "@/services/snaptradeApi";
 import type { BankTransaction, MatchResult } from "@/services/reconciliationService";
+import { generateMerchantFingerprint } from "@/lib/merchantFingerprint";
 import {
   computeAccountBalances,
   getAccountAnchors,
@@ -499,6 +500,75 @@ function parseCsvFile(file: File): Promise<string[][]> {
 
 const NEON_SAVE_CHUNK_SIZE = 15;
 
+// Phase 1 loading strategy: rolling 30-day window for completed matches.
+// Suggested/unmatched/questionable matches are always returned regardless of date.
+// "Load more" extends the watermark backwards in 30-day jumps.
+const MATCH_CACHE_DEFAULT_DAYS = 30;
+const MATCH_CACHE_LOAD_MORE_DAYS = 30;
+
+function filterMatchForBulk(
+  match: MatchResult,
+  filter: "all" | "high_confidence" | "suggested" | "transfers",
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "high_confidence") {
+    return (
+      match.matchType === "suggested_match" &&
+      Boolean(match.matchedSheetExpense?.rowId) &&
+      (match.confidenceScore ?? 0) >= 1.0
+    );
+  }
+  if (filter === "suggested") return match.matchType === "suggested_match";
+  if (filter === "transfers") {
+    return (
+      match.matchType === "transfer" ||
+      (match.matchType === "questionable_match_fuzzy" && Boolean(match.matchedSheetTransfer))
+    );
+  }
+  return true;
+}
+
+function summarizeActivityPayload(actionType: string, payload: unknown): string {
+  const p = (payload ?? {}) as Record<string, any>;
+  switch (actionType) {
+    case "claim_create":
+    case "quick_log": {
+      const links = Array.isArray(p.links) ? p.links : [];
+      const linkSummary = links
+        .map((l: any) => `${l.sheetName ?? "?"}:${l.sheetRowId ?? "?"} ($${((l.amountCents ?? 0) / 100).toFixed(2)})`)
+        .join(", ");
+      return `${p.accountName ?? "—"} • $${(p.bankAmount ?? 0).toFixed?.(2) ?? p.bankAmount} • ${p.bankDate ?? ""}\n${p.bankDescription ?? ""}\n→ ${linkSummary}`;
+    }
+    case "claim_delete":
+      return `Removed claims for hash ${String(p.bankHash ?? "").slice(0, 12)}…`;
+    case "transfer_claim_create":
+      return `Transfer leg: row ${p.transferRowId ?? "?"} • $${((p.bankAmountCents ?? 0) / 100).toFixed(2)} • ${p.bankAccountName ?? "—"}`;
+    case "transfer_claim_delete":
+      return `Removed transfer claim for hash ${String(p.bankHash ?? "").slice(0, 12)}…`;
+    case "dismiss_create":
+      return `Dismissed ${p.accountName ?? "—"}: ${p.note ?? ""}`;
+    case "dismiss_delete":
+      return `Removed dismissal for hash ${String(p.hash ?? "").slice(0, 12)}…`;
+    case "user_dismiss_create":
+      return `Dismissed sheet row ${p.sheetName}:${p.sheetRowId} — ${p.note ?? ""}`;
+    case "user_dismiss_delete":
+      return `Restored sheet row ${p.sheetName}:${p.sheetRowId}`;
+    case "processed_mark":
+      return `Marked processed: ${String(p.hash ?? "").slice(0, 12)}…`;
+    case "processed_unmark":
+      return `Unmarked processed: ${String(p.hash ?? "").slice(0, 12)}…`;
+    default:
+      return JSON.stringify(p, null, 2).slice(0, 240);
+  }
+}
+
+function formatSinceDate(daysAgo: number): string {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
 async function saveMatchCacheToNeon(
   accountName: string,
   matches: MatchResult[],
@@ -641,6 +711,376 @@ export default function ReconcilePage() {
     error: "",
   });
   const [neonStateLoading, setNeonStateLoading] = useState(true);
+  // Watermark: any completed match with updated_at >= this date has been loaded.
+  // Suggested/unmatched/questionable matches are always loaded regardless of date.
+  const [matchCacheSinceDate, setMatchCacheSinceDate] = useState<string>(() =>
+    formatSinceDate(MATCH_CACHE_DEFAULT_DAYS),
+  );
+  const [loadingOlderMatches, setLoadingOlderMatches] = useState(false);
+
+  // Bulk Approve state — Phase 6. Multi-select for the standing review queue.
+  type BulkFilter = "all" | "high_confidence" | "transfers" | "suggested";
+  const [bulkFilter, setBulkFilter] = useState<BulkFilter>("all");
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkApproving, setBulkApproving] = useState(false);
+  const [bulkError, setBulkError] = useState("");
+
+  // Merchant Memory state — Phase 4.
+  type MemoryEntry = {
+    fingerprint: string;
+    bankAccountName: string;
+    sheetCategory: string | null;
+    sheetAccount: string | null;
+    confirmedCount: number;
+    lastConfirmedAt: string;
+  };
+  const [memoryModal, setMemoryModal] = useState<{
+    open: boolean;
+    loading: boolean;
+    entries: MemoryEntry[];
+    error: string;
+    forgettingKey: string | null;
+  }>({
+    open: false,
+    loading: false,
+    entries: [],
+    error: "",
+    forgettingKey: null,
+  });
+
+  // Activity Log state — Phase 3.
+  type ActivityEntry = {
+    id: string;
+    occurredAt: string;
+    actionType: string;
+    actor: string;
+    csvUploadId: string | null;
+    bulkActionId: string | null;
+    parentActionId: string | null;
+    payload: Record<string, unknown>;
+    revertedAt: string | null;
+    revertedByActionId: string | null;
+  };
+  const [activityModal, setActivityModal] = useState<{
+    open: boolean;
+    loading: boolean;
+    entries: ActivityEntry[];
+    since: string;
+    error: string;
+    undoingId: string | null;
+  }>({
+    open: false,
+    loading: false,
+    entries: [],
+    since: formatSinceDate(MATCH_CACHE_DEFAULT_DAYS),
+    error: "",
+    undoingId: null,
+  });
+
+  const loadOlderMatches = useCallback(async () => {
+    if (loadingOlderMatches) return;
+    setLoadingOlderMatches(true);
+    try {
+      const current = matchCacheSinceDate;
+      const base = /^\d{4}-\d{2}-\d{2}$/.test(current)
+        ? new Date(`${current}T00:00:00Z`)
+        : new Date();
+      base.setUTCDate(base.getUTCDate() - MATCH_CACHE_LOAD_MORE_DAYS);
+      const nextSince = base.toISOString().slice(0, 10);
+
+      const res = await fetch(`/api/reconciliation/match-cache?since=${nextSince}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { matchesByAccount?: Record<string, MatchResult[]> };
+      const fetched =
+        data.matchesByAccount && typeof data.matchesByAccount === "object" && !Array.isArray(data.matchesByAccount)
+          ? data.matchesByAccount
+          : {};
+      setMatchesByAccount(mergeWellsFargoBucketIntoChecking(fetched));
+      setMatchCacheSinceDate(nextSince);
+    } catch {
+      // Non-fatal; user can retry.
+    } finally {
+      setLoadingOlderMatches(false);
+    }
+  }, [loadingOlderMatches, matchCacheSinceDate]);
+
+  const loadMemoryEntries = useCallback(async () => {
+    setMemoryModal((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await fetch("/api/reconciliation/memory", { cache: "no-store" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? `Memory fetch failed (${res.status})`);
+      }
+      const data = (await res.json()) as { entries?: MemoryEntry[] };
+      setMemoryModal((prev) => ({
+        ...prev,
+        loading: false,
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        error: "",
+      }));
+    } catch (err) {
+      setMemoryModal((prev) => ({
+        ...prev,
+        loading: false,
+        error: err instanceof Error ? err.message : "Failed to load memory",
+      }));
+    }
+  }, []);
+
+  const openMemoryModal = useCallback(() => {
+    setMemoryModal((prev) => ({ ...prev, open: true, error: "", forgettingKey: null }));
+    void loadMemoryEntries();
+  }, [loadMemoryEntries]);
+
+  const closeMemoryModal = useCallback(() => {
+    setMemoryModal((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const handleForgetMemoryEntry = useCallback(
+    async (entry: MemoryEntry) => {
+      const key = `${entry.fingerprint}|${entry.bankAccountName}`;
+      setMemoryModal((prev) => ({ ...prev, forgettingKey: key, error: "" }));
+      try {
+        const res = await fetch("/api/reconciliation/memory", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fingerprint: entry.fingerprint,
+            bankAccountName: entry.bankAccountName,
+          }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(data.error ?? `Forget failed (${res.status})`);
+        }
+        setMemoryModal((prev) => ({
+          ...prev,
+          forgettingKey: null,
+          entries: prev.entries.filter(
+            (e) => !(e.fingerprint === entry.fingerprint && e.bankAccountName === entry.bankAccountName),
+          ),
+        }));
+      } catch (err) {
+        setMemoryModal((prev) => ({
+          ...prev,
+          forgettingKey: null,
+          error: err instanceof Error ? err.message : "Failed to forget pattern",
+        }));
+      }
+    },
+    [],
+  );
+
+  const loadActivityEntries = useCallback(async (since: string) => {
+    setActivityModal((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const res = await fetch(`/api/reconciliation/activity?since=${since}`, { cache: "no-store" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? `Activity fetch failed (${res.status})`);
+      }
+      const data = (await res.json()) as { entries?: ActivityEntry[]; since?: string };
+      setActivityModal((prev) => ({
+        ...prev,
+        loading: false,
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        since: data.since ?? since,
+        error: "",
+      }));
+    } catch (err) {
+      setActivityModal((prev) => ({
+        ...prev,
+        loading: false,
+        error: err instanceof Error ? err.message : "Failed to load activity",
+      }));
+    }
+  }, []);
+
+  const openActivityModal = useCallback(() => {
+    const initialSince = formatSinceDate(MATCH_CACHE_DEFAULT_DAYS);
+    setActivityModal((prev) => ({
+      ...prev,
+      open: true,
+      since: initialSince,
+      entries: [],
+      error: "",
+      undoingId: null,
+    }));
+    void loadActivityEntries(initialSince);
+  }, [loadActivityEntries]);
+
+  const closeActivityModal = useCallback(() => {
+    setActivityModal((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const loadOlderActivity = useCallback(() => {
+    const current = activityModal.since;
+    const base = /^\d{4}-\d{2}-\d{2}$/.test(current)
+      ? new Date(`${current}T00:00:00Z`)
+      : new Date();
+    base.setUTCDate(base.getUTCDate() - MATCH_CACHE_LOAD_MORE_DAYS);
+    const next = base.toISOString().slice(0, 10);
+    void loadActivityEntries(next);
+  }, [activityModal.since, loadActivityEntries]);
+
+  const handleUndoActivity = useCallback(
+    async (entry: ActivityEntry) => {
+      if (entry.revertedAt) return;
+      setActivityModal((prev) => ({ ...prev, undoingId: entry.id, error: "" }));
+      try {
+        const res = await fetch(`/api/reconciliation/activity/${entry.id}/undo`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(data.error ?? `Undo failed (${res.status})`);
+        }
+        // Refresh activity list so the UI reflects reverted state.
+        await loadActivityEntries(activityModal.since);
+      } catch (err) {
+        setActivityModal((prev) => ({
+          ...prev,
+          undoingId: null,
+          error: err instanceof Error ? err.message : "Failed to undo",
+        }));
+        return;
+      }
+      setActivityModal((prev) => ({ ...prev, undoingId: null }));
+    },
+    [activityModal.since, loadActivityEntries],
+  );
+
+  const isBulkApprovableMatch = useCallback((match: MatchResult): boolean => {
+    // Only suggested_match rows with a confident sheet candidate are bulk-approvable.
+    // Transfers and questionable matches still require user judgment.
+    if (match.matchType !== "suggested_match") return false;
+    if (match.matchedSheetTransfer) return false; // Transfers need leg-direction validation.
+    if (!match.matchedSheetExpense) return false;
+    if (!match.matchedSheetExpense.rowId) return false;
+    if ((match.confidenceScore ?? 0) < 1.0) return false;
+    return true;
+  }, []);
+
+  const handleBulkApprove = useCallback(
+    async (matchesToApprove: MatchResult[]) => {
+      if (matchesToApprove.length === 0) return;
+      setBulkApproving(true);
+      setBulkError("");
+      const bulkActionId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      const results = await Promise.all(
+        matchesToApprove.map(async (match) => {
+          const tx = match.bankTransaction;
+          const sheet = match.matchedSheetExpense;
+          const rowId = sheet?.rowId?.trim();
+          if (!rowId) return { id: idForTx(tx), ok: false, reason: "Missing row id" };
+          try {
+            const res = await fetch("/api/reconciliation/claims", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                bankTransaction: {
+                  hash: tx.hash,
+                  accountName: tx.accountName,
+                  amount: tx.amount,
+                  date: tx.date,
+                  description: tx.description,
+                },
+                links: [
+                  { sheetName: "Expenses", sheetRowId: rowId, amount: Math.abs(tx.amount) },
+                ],
+                actor: "user",
+                bulkActionId,
+              }),
+            });
+            if (!res.ok) {
+              const data = (await res.json().catch(() => ({}))) as { error?: string };
+              return { id: idForTx(tx), ok: false, reason: data.error ?? `HTTP ${res.status}` };
+            }
+            // Memory increment (inlined to avoid forward-ref of recordMerchantMemory).
+            try {
+              const fingerprint = generateMerchantFingerprint(tx.description, tx.amount);
+              void fetch("/api/reconciliation/memory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  fingerprint,
+                  bankAccountName: tx.accountName,
+                  sheetCategory: sheet?.expenseType ?? null,
+                }),
+              });
+            } catch {
+              // best-effort
+            }
+            return { id: idForTx(tx), ok: true, rowId, tx, sheet };
+          } catch (err) {
+            return {
+              id: idForTx(tx),
+              ok: false,
+              reason: err instanceof Error ? err.message : "Network error",
+            };
+          }
+        }),
+      );
+
+      const successful = results.filter((r) => r.ok);
+      const failures = results.filter((r) => !r.ok);
+
+      if (successful.length > 0) {
+        setProcessedHashes((prev) => {
+          const next = new Set(prev);
+          for (const r of successful) {
+            if (r.tx) next.add(r.tx.hash);
+          }
+          return next;
+        });
+        setClaimedRowKeys((prev) => {
+          const next = new Set(prev);
+          for (const r of successful) {
+            if (r.rowId) next.add(claimKey("Expenses", r.rowId));
+          }
+          return next;
+        });
+        const successIds = new Set(successful.map((r) => r.id));
+        setMatchesByAccount((prev) => {
+          const next: Record<string, MatchResult[]> = {};
+          for (const [account, rows] of Object.entries(prev)) {
+            next[account] = rows.map((row) => {
+              const id = idForTx(row.bankTransaction);
+              if (!successIds.has(id)) return row;
+              return {
+                ...row,
+                matchType: "exact_match",
+                reason: "Bulk approved.",
+              };
+            });
+          }
+          return next;
+        });
+        void refreshBankHashesWithNeonClaim();
+      }
+
+      setBulkSelected(new Set());
+      setBulkApproving(false);
+      if (failures.length > 0) {
+        setBulkError(
+          `Approved ${successful.length} of ${matchesToApprove.length}. ${failures.length} failed: ${failures
+            .slice(0, 3)
+            .map((f) => f.reason)
+            .join("; ")}${failures.length > 3 ? "…" : ""}`,
+        );
+      }
+    },
+    [],
+  );
 
   const refreshBankHashesWithNeonClaim = useCallback(async () => {
     try {
@@ -672,8 +1112,9 @@ export default function ReconcilePage() {
 
     async function loadFromNeon() {
       try {
+        const initialSince = formatSinceDate(MATCH_CACHE_DEFAULT_DAYS);
         const [matchCacheRes, csvRowsRes] = await Promise.all([
-          fetch("/api/reconciliation/match-cache", { cache: "no-store" }),
+          fetch(`/api/reconciliation/match-cache?since=${initialSince}`, { cache: "no-store" }),
           fetch("/api/reconciliation/csv-rows", { cache: "no-store" }),
         ]);
         if (cancelled) return;
@@ -1623,17 +2064,47 @@ export default function ReconcilePage() {
     }
   }, [anchorModal.balance, anchorModal.date, closeAnchorModal, selectedAccount]);
 
-  const persistProcessedHash = useCallback(async (tx: BankTransaction) => {
-    const res = await fetch("/api/reconciliation/processed", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hash: tx.hash, accountName: tx.accountName }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || `Failed to save hash (${res.status})`);
+  const recordMerchantMemory = useCallback(async (tx: BankTransaction, sheetCategory?: string | null) => {
+    try {
+      const fingerprint = generateMerchantFingerprint(tx.description, tx.amount);
+      await fetch("/api/reconciliation/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fingerprint,
+          bankAccountName: tx.accountName,
+          sheetCategory: sheetCategory ?? null,
+        }),
+      });
+    } catch {
+      // Memory recording is non-fatal — don't block the user's claim flow.
     }
   }, []);
+
+  const persistProcessedHash = useCallback(
+    async (
+      tx: BankTransaction,
+      meta?: { csvUploadId?: string | null; actor?: "user" | "auto_match" | "memory_match" },
+    ) => {
+      const res = await fetch("/api/reconciliation/processed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hash: tx.hash,
+          accountName: tx.accountName,
+          csvUploadId: meta?.csvUploadId ?? null,
+          actor: meta?.actor ?? "user",
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to save hash (${res.status})`);
+      }
+      // Fire-and-forget memory increment. Runs after success only.
+      void recordMerchantMemory(tx);
+    },
+    [recordMerchantMemory],
+  );
 
   const handleUserStatementClaimSubmit = useCallback(async () => {
     const { entry, selectedBankRowId, transferExpectedLegs } = userStatementClaimModal;
@@ -2700,13 +3171,106 @@ export default function ReconcilePage() {
 
     setQuickAdd((prev) => ({ ...prev, submitting: true, error: "" }));
     try {
+      const description = quickAdd.description.trim();
+      const expenseType = quickAdd.expenseType;
+      const tx = selected.bankTransaction;
+      const bankCents = toCents(Math.abs(tx.amount));
+
       await submitExpense({
-        expenseType: quickAdd.expenseType,
+        expenseType,
         amount: amountNum,
-        description: quickAdd.description.trim(),
+        description,
       });
-      await persistProcessedHash(selected.bankTransaction);
-      setProcessedHashes((prev) => new Set(prev).add(selected.bankTransaction.hash));
+
+      // Find the newly-created sheet row so we can create a claim link.
+      // Apps Script does not return the row id, so we re-fetch and pick the
+      // most recent row matching amount + description + expense type.
+      let linkedRowId: string | null = null;
+      try {
+        const freshExpenses = await getExpenses();
+        const match = [...freshExpenses]
+          .reverse()
+          .find((row) => {
+            if (toCents(Math.abs(Number(row.amount ?? 0))) !== toCents(amountNum)) return false;
+            if ((row.expenseType ?? "").trim() !== expenseType) return false;
+            const desc = (row.description ?? "").trim().toLowerCase();
+            return desc === description.toLowerCase();
+          });
+        if (match?.rowId) {
+          linkedRowId = match.rowId.trim();
+          setSheetExpenses(freshExpenses);
+        }
+      } catch {
+        // Heuristic re-fetch is best-effort; fall through to processed-only.
+      }
+
+      if (linkedRowId) {
+        // Create the claim link, marking processed atomically server-side.
+        const claimRes = await fetch("/api/reconciliation/claims", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bankTransaction: {
+              hash: tx.hash,
+              accountName: tx.accountName,
+              amount: tx.amount,
+              date: tx.date,
+              description: tx.description,
+            },
+            links: [
+              { sheetName: "Expenses", sheetRowId: linkedRowId, amount: Math.abs(tx.amount) },
+            ],
+            actor: "user",
+          }),
+        });
+        if (claimRes.ok) {
+          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+          setClaimedRowKeys((prev) => {
+            const next = new Set(prev);
+            next.add(claimKey("Expenses", linkedRowId as string));
+            return next;
+          });
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [account, rows] of Object.entries(prev)) {
+              next[account] = rows.map((row) => {
+                if (idForTx(row.bankTransaction) !== quickAdd.rowId) return row;
+                return {
+                  ...row,
+                  matchType: "exact_match",
+                  reason: "Quick logged: created sheet row and linked to bank transaction.",
+                  matchedSheetExpense: {
+                    amount: amountNum,
+                    timestamp: tx.date,
+                    description,
+                    expenseType,
+                    account: tx.accountName,
+                    rowId: linkedRowId as string,
+                    date: tx.date,
+                  },
+                  matchedSheetIndex: undefined,
+                  matchedSheetTransfer: undefined,
+                  matchedSheetTransferIndex: undefined,
+                };
+              });
+            }
+            return next;
+          });
+          // Memory increment: this user-confirmed pattern should auto-claim next time.
+          void recordMerchantMemory(tx, expenseType);
+          void refreshBankHashesWithNeonClaim();
+        } else {
+          // Sheet row exists, but linking failed. Fall back to processed-only.
+          await persistProcessedHash(tx);
+          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+        }
+      } else {
+        // No row id discovered — fall back to processed-only so the bank tx
+        // disappears from review. The user can manually claim later.
+        await persistProcessedHash(tx);
+        setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+      }
+
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
         next.delete(quickAdd.rowId as string);
@@ -2720,7 +3284,14 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to quick add.",
       }));
     }
-  }, [allMatches, closeQuickAdd, persistProcessedHash, quickAdd]);
+  }, [
+    allMatches,
+    closeQuickAdd,
+    persistProcessedHash,
+    quickAdd,
+    recordMerchantMemory,
+    refreshBankHashesWithNeonClaim,
+  ]);
 
   const splitTargetAmount = useMemo(() => {
     if (!splitModal.rowId) return 0;
@@ -3084,6 +3655,13 @@ export default function ReconcilePage() {
           throw new Error("CSV file has no data rows.");
         }
 
+        // Tag every audit-log entry from this upload with a single UUID so future
+        // CSV-cascade-delete (Phase 3 follow-up) can group them.
+        const csvUploadId =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
         const mergedCsv = mergeCsvRowArrays(
           statementCsvRowsByAccountRef.current[selectedAccount],
           parsedRows,
@@ -3198,7 +3776,10 @@ export default function ReconcilePage() {
         await Promise.all(
           autoApprovable.map(async (match) => {
             try {
-              await persistProcessedHash(match.bankTransaction);
+              await persistProcessedHash(match.bankTransaction, {
+                csvUploadId,
+                actor: "auto_match",
+              });
               autoApprovedHashes.push(match.bankTransaction.hash);
             } catch (err) {
               autoApprovalErrors.push(
@@ -3322,6 +3903,20 @@ export default function ReconcilePage() {
               className="px-3 py-1.5 rounded-lg border border-red-500/40 text-red-300 text-sm hover:text-red-200 hover:bg-red-500/10 transition-colors"
             >
               Clear reconciliation data
+            </button>
+            <button
+              type="button"
+              onClick={openMemoryModal}
+              className="px-3 py-1.5 rounded-lg bg-[#252525] border border-charcoal-dark text-gray-200 text-sm hover:text-white hover:bg-[#2d2d2d] transition-colors"
+            >
+              Memory
+            </button>
+            <button
+              type="button"
+              onClick={openActivityModal}
+              className="px-3 py-1.5 rounded-lg bg-[#252525] border border-charcoal-dark text-gray-200 text-sm hover:text-white hover:bg-[#2d2d2d] transition-colors"
+            >
+              Activity
             </button>
             <button
               type="button"
@@ -3879,21 +4474,127 @@ export default function ReconcilePage() {
                 </button>
               </div>
               <div className="p-3 text-sm">
+                {activeReviewRows.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 pb-2 mb-2 border-b border-charcoal-dark">
+                    {(["all", "high_confidence", "suggested", "transfers"] as BulkFilter[]).map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => setBulkFilter(f)}
+                        className={`px-2.5 py-1 rounded-full text-[11px] uppercase tracking-wide transition-colors ${
+                          bulkFilter === f
+                            ? "bg-accent text-white"
+                            : "bg-[#252525] border border-charcoal-dark text-gray-400 hover:text-white hover:bg-[#2d2d2d]"
+                        }`}
+                      >
+                        {f === "all"
+                          ? "All"
+                          : f === "high_confidence"
+                            ? "High confidence"
+                            : f === "suggested"
+                              ? "Suggested"
+                              : "Transfers"}
+                      </button>
+                    ))}
+                    <div className="flex-1" />
+                    {(() => {
+                      const visibleApprovable = activeReviewRows
+                        .filter((m) => filterMatchForBulk(m, bulkFilter))
+                        .filter((m) => isBulkApprovableMatch(m));
+                      if (visibleApprovable.length === 0) return null;
+                      const allSelected = visibleApprovable.every((m) =>
+                        bulkSelected.has(idForTx(m.bankTransaction)),
+                      );
+                      const someSelected = visibleApprovable.some((m) =>
+                        bulkSelected.has(idForTx(m.bankTransaction)),
+                      );
+                      return (
+                        <label className="inline-flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            ref={(el) => {
+                              if (el) el.indeterminate = !allSelected && someSelected;
+                            }}
+                            onChange={() => {
+                              setBulkSelected((prev) => {
+                                const next = new Set(prev);
+                                if (allSelected) {
+                                  for (const m of visibleApprovable) next.delete(idForTx(m.bankTransaction));
+                                } else {
+                                  for (const m of visibleApprovable) next.add(idForTx(m.bankTransaction));
+                                }
+                                return next;
+                              });
+                            }}
+                            className="accent-accent"
+                          />
+                          Select all visible ({visibleApprovable.length})
+                        </label>
+                      );
+                    })()}
+                    {bulkSelected.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const selectedMatches = activeReviewRows.filter(
+                            (m) => bulkSelected.has(idForTx(m.bankTransaction)) && isBulkApprovableMatch(m),
+                          );
+                          void handleBulkApprove(selectedMatches);
+                        }}
+                        disabled={bulkApproving}
+                        className="px-3 py-1.5 rounded-lg bg-accent text-white text-xs font-medium hover:bg-accent-dark disabled:opacity-50 inline-flex items-center gap-2"
+                      >
+                        {bulkApproving ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            Approving {bulkSelected.size}…
+                          </>
+                        ) : (
+                          <>Approve {bulkSelected.size} selected</>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {bulkError && <p className="text-amber-300 text-xs mb-2">{bulkError}</p>}
                 {activeReviewRows.length === 0 ? (
                   <p className="text-gray-400">No rows requiring manual review for this account.</p>
                 ) : (
                   <div className="space-y-2">
-                    {activeReviewRows.map((match, index) => {
+                    {activeReviewRows.filter((m) => filterMatchForBulk(m, bulkFilter)).map((match, index) => {
                       const tx = match.bankTransaction;
                       const id = idForTx(tx);
                       const isTransferCandidate =
                         (match.matchType === "transfer" || match.matchType === "questionable_match_fuzzy" || match.matchType === "suggested_match") &&
                         Boolean(match.matchedSheetTransfer?.transferRowId);
+                      const canBulk = isBulkApprovableMatch(match);
+                      const isChecked = bulkSelected.has(id);
                       return (
                         <div
                           key={`${id}-${index}`}
                           className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         >
+                          <div className="flex items-start gap-2">
+                            <div className="pt-1.5 shrink-0 w-5 flex justify-center">
+                              {canBulk ? (
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => {
+                                    setBulkSelected((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(id)) next.delete(id);
+                                      else next.add(id);
+                                      return next;
+                                    });
+                                  }}
+                                  className="accent-accent"
+                                  aria-label="Select for bulk approve"
+                                />
+                              ) : null}
+                            </div>
+                            <div className="flex-1 min-w-0">
                           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start">
                             <div className="min-w-0">
                               <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
@@ -4005,6 +4706,8 @@ export default function ReconcilePage() {
                               >
                                 Claim
                               </button>
+                            </div>
+                          </div>
                             </div>
                           </div>
                         </div>
@@ -4183,6 +4886,27 @@ export default function ReconcilePage() {
               </section>
             )}
 
+            <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
+              <p className="text-xs text-gray-500">
+                Matched rows shown since {matchCacheSinceDate}. Pending/unmatched rows are always shown.
+              </p>
+              <button
+                type="button"
+                onClick={loadOlderMatches}
+                disabled={loadingOlderMatches}
+                className="px-3 py-1.5 rounded-lg bg-[#252525] border border-charcoal-dark text-gray-200 text-xs hover:text-white hover:bg-[#2d2d2d] transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+              >
+                {loadingOlderMatches ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Loading older…
+                  </>
+                ) : (
+                  <>Load older matched rows</>
+                )}
+              </button>
+            </div>
+
             {activeReviewRows.length > 0 && (
               <p className="text-xs text-gray-500">
                 Showing {activeReviewRows.length} unmatched/suggested row
@@ -4192,6 +4916,233 @@ export default function ReconcilePage() {
           </>
         )}
       </div>
+
+      {memoryModal.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeMemoryModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="memory-modal-title"
+        >
+          <div
+            className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <div>
+                <h2 id="memory-modal-title" className="text-white font-semibold">Merchant Memory</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Patterns the system remembers. Auto-claim fires after 2+ confirmations.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeMemoryModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {memoryModal.error && (
+                <p className="text-red-300 text-sm mb-3">{memoryModal.error}</p>
+              )}
+              {memoryModal.loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-5 h-5 animate-spin text-accent" />
+                  <span className="ml-2 text-gray-400 text-sm">Loading memory…</span>
+                </div>
+              ) : memoryModal.entries.length === 0 ? (
+                <p className="text-gray-400 text-sm text-center py-8">
+                  No remembered patterns yet. The system will start learning after you claim recurring transactions.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {memoryModal.entries.map((entry) => {
+                    const key = `${entry.fingerprint}|${entry.bankAccountName}`;
+                    const isAutoClaiming = entry.confirmedCount >= 2;
+                    const isForgetting = memoryModal.forgettingKey === key;
+                    return (
+                      <div
+                        key={key}
+                        className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                                {entry.bankAccountName}
+                              </span>
+                              <span
+                                className={`text-[10px] uppercase tracking-wide font-semibold ${
+                                  isAutoClaiming ? "text-accent" : "text-gray-500"
+                                }`}
+                              >
+                                {entry.confirmedCount}× confirmed
+                                {isAutoClaiming ? " • auto-claims" : " • not yet auto"}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-300 mt-1 font-mono break-words">{entry.fingerprint}</p>
+                            {entry.sheetCategory && (
+                              <p className="text-xs text-gray-500 mt-0.5">Category: {entry.sheetCategory}</p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleForgetMemoryEntry(entry)}
+                            disabled={isForgetting}
+                            className="px-2.5 py-1 rounded-md border border-red-500/40 bg-[#252525] text-red-300 text-xs hover:text-red-200 hover:bg-red-500/10 transition-colors disabled:opacity-40 inline-flex items-center gap-1.5 shrink-0"
+                          >
+                            {isForgetting ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Forgetting…
+                              </>
+                            ) : (
+                              <>Forget</>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 bg-[#353535] border-t border-charcoal-dark flex items-center justify-end">
+              <button
+                type="button"
+                onClick={closeMemoryModal}
+                className="px-3 py-1.5 rounded-lg bg-accent text-white text-xs hover:bg-accent/80 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activityModal.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          onClick={closeActivityModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="activity-modal-title"
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between">
+              <div>
+                <h2 id="activity-modal-title" className="text-white font-semibold">Reconciliation Activity</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Showing actions since {activityModal.since}. Click Undo to reverse a single action.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeActivityModal}
+                className="p-1 rounded-md text-gray-400 hover:text-white hover:bg-charcoal transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {activityModal.error && (
+                <p className="text-red-300 text-sm mb-3">{activityModal.error}</p>
+              )}
+              {activityModal.loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-5 h-5 animate-spin text-accent" />
+                  <span className="ml-2 text-gray-400 text-sm">Loading activity…</span>
+                </div>
+              ) : activityModal.entries.length === 0 ? (
+                <p className="text-gray-400 text-sm text-center py-8">No activity in this window.</p>
+              ) : (
+                <div className="space-y-2">
+                  {activityModal.entries.map((entry) => {
+                    const isReverted = !!entry.revertedAt;
+                    const isUndoing = activityModal.undoingId === entry.id;
+                    const occurred = new Date(entry.occurredAt);
+                    const occurredLabel = Number.isNaN(occurred.getTime())
+                      ? entry.occurredAt
+                      : occurred.toLocaleString();
+                    return (
+                      <div
+                        key={entry.id}
+                        className={`rounded-lg border px-3 py-2 ${
+                          isReverted
+                            ? "border-charcoal-dark bg-[#2a2a2a] opacity-60"
+                            : "border-charcoal-dark bg-[#2c2c2c]"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[11px] uppercase tracking-wide text-accent font-semibold">
+                                {entry.actionType}
+                              </span>
+                              <span className="text-[10px] uppercase tracking-wide text-gray-500">
+                                {entry.actor}
+                              </span>
+                              {isReverted && (
+                                <span className="text-[10px] uppercase tracking-wide text-amber-300/80">
+                                  reverted
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-400 mt-0.5">{occurredLabel}</p>
+                            <pre className="text-[11px] text-gray-300 mt-1 whitespace-pre-wrap break-words font-mono">
+                              {summarizeActivityPayload(entry.actionType, entry.payload)}
+                            </pre>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleUndoActivity(entry)}
+                            disabled={isReverted || isUndoing}
+                            className="px-2.5 py-1 rounded-md border border-charcoal-dark bg-[#252525] text-gray-200 text-xs hover:text-white hover:bg-[#2d2d2d] transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5 shrink-0"
+                          >
+                            {isUndoing ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Undoing…
+                              </>
+                            ) : (
+                              <>Undo</>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 bg-[#353535] border-t border-charcoal-dark flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={loadOlderActivity}
+                disabled={activityModal.loading}
+                className="px-3 py-1.5 rounded-lg bg-[#252525] border border-charcoal-dark text-gray-200 text-xs hover:text-white hover:bg-[#2d2d2d] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Load older activity
+              </button>
+              <button
+                type="button"
+                onClick={closeActivityModal}
+                className="px-3 py-1.5 rounded-lg bg-accent text-white text-xs hover:bg-accent/80 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {quickAdd.open && (
         <div

@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import {
+  buildActivityLogInsert,
+  ensureActivityLogTable,
+  parseActivityGroupingIds,
+  type ActivityActor,
+} from "@/lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +16,11 @@ type DismissalRow = {
   note: string;
   created_at: string;
 };
+
+function normalizeActor(value: unknown): ActivityActor {
+  if (value === "auto_match" || value === "memory_match") return value;
+  return "user";
+}
 
 async function ensureDismissalsTable(sql: any) {
   await sql`
@@ -91,30 +102,39 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "note is required" }, { status: 400 });
   }
 
+  const actor = normalizeActor((body as { actor?: unknown }).actor);
+  const grouping = parseActivityGroupingIds(body);
+
   const sql = neon(connectionString);
   try {
     await ensureDismissalsTable(sql);
-    await sql`
-      INSERT INTO reconciliation_statement_dismissals (hash, account_name, note)
-      VALUES (${hash}, ${accountName}, ${note})
-      ON CONFLICT (hash, account_name) DO UPDATE SET note = EXCLUDED.note
-    `;
-    await sql`
-      INSERT INTO processed_transactions (hash, account_name)
-      VALUES (${hash}, ${accountName})
-      ON CONFLICT (hash) DO UPDATE SET account_name = EXCLUDED.account_name
-    `;
-    return NextResponse.json({ success: true, hash, accountName, note });
+    await ensureActivityLogTable(sql);
+
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "dismiss_create",
+      actor,
+      payload: { hash, accountName, note },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    await sql.transaction([
+      sql`
+        INSERT INTO reconciliation_statement_dismissals (hash, account_name, note)
+        VALUES (${hash}, ${accountName}, ${note})
+        ON CONFLICT (hash, account_name) DO UPDATE SET note = EXCLUDED.note
+      `,
+      sql`
+        INSERT INTO processed_transactions (hash, account_name)
+        VALUES (${hash}, ${accountName})
+        ON CONFLICT (hash) DO UPDATE SET account_name = EXCLUDED.account_name
+      `,
+      logInsert,
+    ]);
+    return NextResponse.json({ success: true, hash, accountName, note, actionId });
   } catch (err) {
     console.error("Reconciliation dismissals POST error:", err);
-    try {
-      await sql`
-        DELETE FROM reconciliation_statement_dismissals
-        WHERE hash = ${hash} AND account_name = ${accountName}
-      `;
-    } catch {
-      // best-effort rollback of dismissal row only; never delete processed here
-    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to save dismissal" },
       { status: 502 },
@@ -148,25 +168,60 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "hash is required" }, { status: 400 });
   }
 
+  const actor = normalizeActor((body as { actor?: unknown }).actor);
+  const grouping = parseActivityGroupingIds(body);
+
   try {
     const sql = neon(connectionString);
     await ensureDismissalsTable(sql);
-    const rows = accountName
+    await ensureActivityLogTable(sql);
+
+    const existing = accountName
       ? ((await sql`
+          SELECT hash, account_name, note
+          FROM reconciliation_statement_dismissals
+          WHERE hash = ${hash} AND account_name = ${accountName}
+        `) as DismissalRow[])
+      : ((await sql`
+          SELECT hash, account_name, note
+          FROM reconciliation_statement_dismissals
+          WHERE hash = ${hash}
+        `) as DismissalRow[]);
+
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "dismiss_delete",
+      actor,
+      payload: {
+        hash,
+        accountName: accountName || null,
+        deleted: existing.map((row) => ({
+          hash: row.hash,
+          accountName: row.account_name,
+          note: row.note,
+        })),
+      },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    const deleteQuery = accountName
+      ? sql`
           DELETE FROM reconciliation_statement_dismissals
           WHERE hash = ${hash} AND account_name = ${accountName}
-          RETURNING hash
-        `) as Array<{ hash: string }>)
-      : ((await sql`
+        `
+      : sql`
           DELETE FROM reconciliation_statement_dismissals
           WHERE hash = ${hash}
-          RETURNING hash
-        `) as Array<{ hash: string }>);
+        `;
+
+    await sql.transaction([deleteQuery, logInsert]);
 
     return NextResponse.json({
       success: true,
       hash,
-      deleted: rows.length,
+      deleted: existing.length,
+      actionId,
     });
   } catch (err) {
     console.error("Reconciliation dismissals DELETE error:", err);

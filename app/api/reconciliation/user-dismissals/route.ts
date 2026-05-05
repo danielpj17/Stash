@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import {
+  buildActivityLogInsert,
+  ensureActivityLogTable,
+  parseActivityGroupingIds,
+  type ActivityActor,
+} from "@/lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function normalizeActor(value: unknown): ActivityActor {
+  if (value === "auto_match" || value === "memory_match") return value;
+  return "user";
+}
 
 type UserDismissalRow = {
   sheet_name: string;
@@ -92,25 +103,123 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "note is required" }, { status: 400 });
   }
 
+  const actor = normalizeActor((body as { actor?: unknown }).actor);
+  const grouping = parseActivityGroupingIds(body);
+
   const sql = neon(connectionString);
   try {
     await ensureUserDismissalsTable(sql);
-    await sql`
-      INSERT INTO reconciliation_user_sheet_dismissals (sheet_name, sheet_row_id, note)
-      VALUES (${sheetName}, ${sheetRowId}, ${note})
-      ON CONFLICT (sheet_name, sheet_row_id) DO UPDATE SET note = EXCLUDED.note
-    `;
+    await ensureActivityLogTable(sql);
+
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "user_dismiss_create",
+      actor,
+      payload: { sheetName, sheetRowId, note },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    await sql.transaction([
+      sql`
+        INSERT INTO reconciliation_user_sheet_dismissals (sheet_name, sheet_row_id, note)
+        VALUES (${sheetName}, ${sheetRowId}, ${note})
+        ON CONFLICT (sheet_name, sheet_row_id) DO UPDATE SET note = EXCLUDED.note
+      `,
+      logInsert,
+    ]);
     return NextResponse.json({
       success: true,
       key: claimKey(sheetName, sheetRowId),
       sheetName,
       sheetRowId,
       note,
+      actionId,
     });
   } catch (err) {
     console.error("Reconciliation user-dismissals POST error:", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to save user dismissal" },
+      { status: 502 },
+    );
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    return NextResponse.json({ error: "DATABASE_URL not configured" }, { status: 503 });
+  }
+
+  let body: {
+    sheetName?: unknown;
+    sheetRowId?: unknown;
+    actor?: unknown;
+    csvUploadId?: unknown;
+    bulkActionId?: unknown;
+    parentActionId?: unknown;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const sheetName = typeof body.sheetName === "string" ? body.sheetName.trim() : "";
+  const sheetRowId = typeof body.sheetRowId === "string" ? body.sheetRowId.trim() : "";
+
+  if (sheetName !== "Expenses" && sheetName !== "Transfers") {
+    return NextResponse.json({ error: "sheetName must be Expenses or Transfers" }, { status: 400 });
+  }
+  if (!sheetRowId) {
+    return NextResponse.json({ error: "sheetRowId is required" }, { status: 400 });
+  }
+
+  const actor = normalizeActor(body.actor);
+  const grouping = parseActivityGroupingIds(body);
+
+  try {
+    const sql = neon(connectionString);
+    await ensureUserDismissalsTable(sql);
+    await ensureActivityLogTable(sql);
+
+    const existing = (await sql`
+      SELECT sheet_name, sheet_row_id, note
+      FROM reconciliation_user_sheet_dismissals
+      WHERE sheet_name = ${sheetName} AND sheet_row_id = ${sheetRowId}
+    `) as UserDismissalRow[];
+
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "user_dismiss_delete",
+      actor,
+      payload: {
+        sheetName,
+        sheetRowId,
+        deleted: existing.map((r) => ({ sheetName: r.sheet_name, sheetRowId: r.sheet_row_id, note: r.note })),
+      },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    await sql.transaction([
+      sql`
+        DELETE FROM reconciliation_user_sheet_dismissals
+        WHERE sheet_name = ${sheetName} AND sheet_row_id = ${sheetRowId}
+      `,
+      logInsert,
+    ]);
+
+    return NextResponse.json({
+      success: true,
+      key: claimKey(sheetName, sheetRowId),
+      deleted: existing.length,
+      actionId,
+    });
+  } catch (err) {
+    console.error("Reconciliation user-dismissals DELETE error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to delete user dismissal" },
       { status: 502 },
     );
   }

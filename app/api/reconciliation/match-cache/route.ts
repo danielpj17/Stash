@@ -27,20 +27,44 @@ async function ensureMatchCacheTable(sql: any) {
   `;
 }
 
-export async function GET() {
+// Match types considered "completed" — only these get filtered by `?since=`.
+// Actionable types (suggested_match, unmatched, questionable_match_fuzzy, transfer)
+// are always returned regardless of date so the user never loses a pending row.
+const COMPLETED_MATCH_TYPES = ["exact_match", "processed"];
+
+function parseSinceParam(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const d = new Date(`${trimmed}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  return trimmed;
+}
+
+export async function GET(request: NextRequest) {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     return NextResponse.json({ matchesByAccount: {} as Record<string, unknown[]> });
   }
 
+  const since = parseSinceParam(request.nextUrl.searchParams.get("since"));
+
   try {
     const sql = neon(connectionString);
     await ensureMatchCacheTable(sql);
-    const rows = (await sql`
-      SELECT account_name, bank_hash, match_data
-      FROM reconciliation_match_cache
-      ORDER BY updated_at ASC
-    `) as MatchCacheRow[];
+    const rows = since
+      ? ((await sql`
+          SELECT account_name, bank_hash, match_data
+          FROM reconciliation_match_cache
+          WHERE (match_data->>'matchType') NOT IN ('exact_match', 'processed')
+             OR updated_at >= ${since}::timestamp
+          ORDER BY updated_at ASC
+        `) as MatchCacheRow[])
+      : ((await sql`
+          SELECT account_name, bank_hash, match_data
+          FROM reconciliation_match_cache
+          ORDER BY updated_at ASC
+        `) as MatchCacheRow[]);
 
     const matchesByAccount: Record<string, unknown[]> = {};
     for (const row of rows) {
@@ -54,7 +78,11 @@ export async function GET() {
       matchesByAccount[account].push(matchData);
     }
 
-    return NextResponse.json({ matchesByAccount });
+    return NextResponse.json({
+      matchesByAccount,
+      since: since ?? null,
+      completedMatchTypes: COMPLETED_MATCH_TYPES,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to fetch match cache" },

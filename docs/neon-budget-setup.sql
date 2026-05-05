@@ -1,12 +1,7 @@
-# Neon budget storage setup
+-- Neon budget + reconciliation schema.
+-- Paste the entire file into Neon SQL Editor and run.
+-- Safe to re-run: every CREATE uses IF NOT EXISTS.
 
-Budget data is stored in Neon Postgres so it syncs across devices. Run this SQL once in the Neon SQL editor after creating your project and database.
-
-1. In [Neon](https://neon.tech), create a project and copy the **connection string**. Use the **pooled** (Transaction mode) connection string for Next.js/serverless.
-2. Add it to `.env.local`: `DATABASE_URL=postgresql://...` (no quotes around the value).
-3. In Neon Dashboard → SQL Editor, paste the entire contents of [`docs/neon-budget-setup.sql`](./neon-budget-setup.sql) and run. (The block below is the same SQL inline for reference — but copy from the `.sql` file to avoid Markdown syntax sneaking in.)
-
-```sql
 CREATE TABLE IF NOT EXISTS budget_store (
   id integer primary key default 1,
   data jsonb not null default '{}'
@@ -58,7 +53,6 @@ CREATE TABLE IF NOT EXISTS reconciliation_statement_dismissals (
 );
 
 -- Merchant memory: tracks recurring patterns to auto-claim after 2+ confirmations.
--- Phase 4 of reconcile improvements.
 CREATE TABLE IF NOT EXISTS reconciliation_merchant_memory (
   fingerprint TEXT NOT NULL,
   bank_account_name TEXT NOT NULL,
@@ -70,8 +64,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_merchant_memory (
 );
 
 -- Persistent audit log of every reconciliation action.
--- Used by the Activity tab to provide per-action and per-CSV-upload undo.
--- Never auto-purged — full history is the user's source of truth.
+-- Used by the Activity tab for per-action and per-CSV-upload undo.
 CREATE TABLE IF NOT EXISTS reconciliation_activity_log (
   id UUID PRIMARY KEY,
   occurred_at TIMESTAMP NOT NULL DEFAULT now(),
@@ -88,7 +81,3 @@ CREATE INDEX IF NOT EXISTS idx_activity_log_occurred
   ON reconciliation_activity_log(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_log_csv
   ON reconciliation_activity_log(csv_upload_id);
-```
-
-4. Run the manual assets/liabilities setup script from `docs/neon-manual-assets-liabilities.sql` in the same SQL editor.
-5. Restart your dev server.

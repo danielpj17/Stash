@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { generateMerchantFingerprint } from "@/lib/merchantFingerprint";
+
+export { generateMerchantFingerprint };
 
 export type BankProfile = {
   dateIndex: number | null;
@@ -98,10 +101,20 @@ export type MatchResult = {
   matchedSheetTransferIndex?: number;
   transferCounterparty?: BankTransaction;
   matchedByNeonHash?: boolean;
+  matchedByMerchantMemory?: boolean;
   confidenceScore?: number;
   candidateCount?: number;
   isAmbiguousCluster?: boolean;
 };
+
+export type MerchantMemoryEntry = {
+  fingerprint: string;
+  bankAccountName: string;
+  confirmedCount: number;
+  sheetCategory?: string | null;
+  sheetAccount?: string | null;
+};
+
 
 /**
  * Creates a stable transaction hash for deduplication across imports/sync runs.
@@ -559,6 +572,7 @@ export async function findMatches(
     processedHashes?: Iterable<string>;
     sheetTransfers?: SheetTransferLike[];
     transferClaimStatusByRowId?: Record<string, TransferClaimStatus>;
+    merchantMemory?: MerchantMemoryEntry[];
   },
 ): Promise<MatchResult[]> {
   const processedHashes = options?.processedHashes
@@ -567,6 +581,13 @@ export async function findMatches(
   const exactSheetIndex = toIndexedMap(sheetExpenses);
   const amountIndex = toAmountOnlyIndex(sheetExpenses);
   const clusterSet = buildClusterSet(bankTransactions);
+
+  // Merchant Memory — Phase 4. Only entries with confirmed_count >= 2 auto-match.
+  const memoryByKey = new Map<string, MerchantMemoryEntry>();
+  for (const entry of options?.merchantMemory ?? []) {
+    if (!entry || (entry.confirmedCount ?? 0) < 2) continue;
+    memoryByKey.set(`${entry.fingerprint}|${entry.bankAccountName}`, entry);
+  }
 
   const AUTO_SCORE_THRESHOLD = 1.0;
   const AUTO_SCORE_MARGIN = 0.3;
@@ -605,6 +626,39 @@ export async function findMatches(
         matchedByNeonHash: true,
       });
       continue;
+    }
+
+    // Merchant Memory: if this fingerprint has been confirmed >= 2 times,
+    // auto-match against the most-recent unclaimed sheet expense with the
+    // same amount.
+    if (memoryByKey.size > 0) {
+      const fingerprint = generateMerchantFingerprint(tx.description, tx.amount);
+      const memEntry = memoryByKey.get(`${fingerprint}|${tx.accountName}`);
+      if (memEntry) {
+        const candidates = amountIndex.get(amountKey(tx.amount)) ?? [];
+        const sortedCandidates = [...candidates].sort((a, b) => {
+          const aDate = String(a.date ?? a.timestamp ?? "");
+          const bDate = String(b.date ?? b.timestamp ?? "");
+          return bDate.localeCompare(aDate);
+        });
+        const pick = sortedCandidates.find((row) => {
+          const rowId = String(row.rowId ?? "").trim();
+          return !rowId || !consumedRowIds.has(rowId);
+        });
+        if (pick) {
+          const rowId = String(pick.rowId ?? "").trim();
+          if (rowId) consumedRowIds.add(rowId);
+          results.push({
+            bankTransaction: tx,
+            matchType: "exact_match",
+            reason: `Memory: matched recurring pattern (${memEntry.confirmedCount} prior confirmations).`,
+            matchedSheetExpense: pick,
+            matchedSheetIndex: sheetExpenses.indexOf(pick),
+            matchedByMerchantMemory: true,
+          });
+          continue;
+        }
+      }
     }
 
     const sheetTransfers = options?.sheetTransfers ?? [];

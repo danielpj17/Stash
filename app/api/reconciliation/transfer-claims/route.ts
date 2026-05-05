@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import {
+  buildActivityLogInsert,
+  ensureActivityLogTable,
+  parseActivityGroupingIds,
+  type ActivityActor,
+} from "@/lib/activityLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +27,16 @@ type TransferClaimRequestBody = {
     accountName?: unknown;
     amount?: unknown;
   };
+  actor?: unknown;
+  csvUploadId?: unknown;
+  bulkActionId?: unknown;
+  parentActionId?: unknown;
 };
+
+function normalizeActor(value: unknown): ActivityActor {
+  if (value === "auto_match" || value === "memory_match") return value;
+  return "user";
+}
 
 function toCents(value: number): number {
   return Math.round(Number(value) * 100);
@@ -197,28 +212,49 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    await sql`
-      INSERT INTO reconciliation_transfer_claim_links (
-        transfer_sheet_row_id,
-        bank_hash,
-        bank_account_name,
-        bank_amount_cents,
-        expected_legs
-      )
-      VALUES (
-        ${transferRowId},
-        ${bankHash},
-        ${bankAccountName || null},
-        ${newAmountCents},
-        ${effectiveExpectedLegs}
-      )
-    `;
+    const actor = normalizeActor(body.actor);
+    const grouping = parseActivityGroupingIds(body);
+    await ensureActivityLogTable(sql);
 
-    await sql`
-      INSERT INTO processed_transactions (hash, account_name)
-      VALUES (${bankHash}, ${bankAccountName || null})
-      ON CONFLICT (hash) DO UPDATE SET account_name = EXCLUDED.account_name
-    `;
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "transfer_claim_create",
+      actor,
+      payload: {
+        transferRowId,
+        bankHash,
+        bankAccountName: bankAccountName || null,
+        bankAmountCents: newAmountCents,
+        expectedLegs: effectiveExpectedLegs,
+      },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    await sql.transaction([
+      sql`
+        INSERT INTO reconciliation_transfer_claim_links (
+          transfer_sheet_row_id,
+          bank_hash,
+          bank_account_name,
+          bank_amount_cents,
+          expected_legs
+        )
+        VALUES (
+          ${transferRowId},
+          ${bankHash},
+          ${bankAccountName || null},
+          ${newAmountCents},
+          ${effectiveExpectedLegs}
+        )
+      `,
+      sql`
+        INSERT INTO processed_transactions (hash, account_name)
+        VALUES (${bankHash}, ${bankAccountName || null})
+        ON CONFLICT (hash) DO UPDATE SET account_name = EXCLUDED.account_name
+      `,
+      logInsert,
+    ]);
 
     const claimedCount = existing.length + 1;
     const isComplete = claimedCount >= effectiveExpectedLegs;
@@ -228,6 +264,7 @@ export async function POST(request: NextRequest) {
       claimedCount,
       expectedLegs: effectiveExpectedLegs,
       isComplete,
+      actionId,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to save transfer claim";
@@ -247,14 +284,13 @@ export async function DELETE(request: NextRequest) {
       hash?: unknown;
       accountName?: unknown;
     };
+    actor?: unknown;
+    csvUploadId?: unknown;
+    bulkActionId?: unknown;
+    parentActionId?: unknown;
   };
   try {
-    body = (await request.json()) as {
-      bankTransaction?: {
-        hash?: unknown;
-        accountName?: unknown;
-      };
-    };
+    body = (await request.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -270,25 +306,60 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "bankTransaction.hash is required" }, { status: 400 });
   }
 
+  const actor = normalizeActor(body.actor);
+  const grouping = parseActivityGroupingIds(body);
+
   try {
     const sql = neon(connectionString);
     await ensureTransferClaimsTable(sql);
-    const rows = accountName
-      ? (await sql`
+    await ensureActivityLogTable(sql);
+
+    const existing = accountName
+      ? ((await sql`
+          SELECT transfer_sheet_row_id, bank_hash, bank_account_name, bank_amount_cents, expected_legs
+          FROM reconciliation_transfer_claim_links
+          WHERE bank_hash = ${bankHash} AND bank_account_name = ${accountName}
+        `) as TransferClaimRow[])
+      : ((await sql`
+          SELECT transfer_sheet_row_id, bank_hash, bank_account_name, bank_amount_cents, expected_legs
+          FROM reconciliation_transfer_claim_links
+          WHERE bank_hash = ${bankHash}
+        `) as TransferClaimRow[]);
+
+    const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
+      actionType: "transfer_claim_delete",
+      actor,
+      payload: {
+        bankHash,
+        accountName: accountName || null,
+        deleted: existing.map((row) => ({
+          transferRowId: row.transfer_sheet_row_id,
+          bankAmountCents: Number(row.bank_amount_cents ?? 0),
+          expectedLegs: Number(row.expected_legs ?? 2),
+        })),
+      },
+      csvUploadId: grouping.csvUploadId,
+      bulkActionId: grouping.bulkActionId,
+      parentActionId: grouping.parentActionId,
+    });
+
+    const deleteQuery = accountName
+      ? sql`
           DELETE FROM reconciliation_transfer_claim_links
           WHERE bank_hash = ${bankHash} AND bank_account_name = ${accountName}
-          RETURNING bank_hash
-        `) as Array<{ bank_hash: string }>
-      : (await sql`
+        `
+      : sql`
           DELETE FROM reconciliation_transfer_claim_links
           WHERE bank_hash = ${bankHash}
-          RETURNING bank_hash
-        `) as Array<{ bank_hash: string }>;
+        `;
+
+    await sql.transaction([deleteQuery, logInsert]);
 
     return NextResponse.json({
       success: true,
       bankHash,
-      deleted: rows.length,
+      deleted: existing.length,
+      actionId,
     });
   } catch (err) {
     return NextResponse.json(

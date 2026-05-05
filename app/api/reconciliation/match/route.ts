@@ -3,6 +3,7 @@ import { neon } from "@neondatabase/serverless";
 import {
   findMatches,
   mapBankRowsToTransactions,
+  type MerchantMemoryEntry,
   type SheetExpenseLike,
   type SheetTransferLike,
 } from "@/services/reconciliationService";
@@ -104,6 +105,36 @@ function normalizeSheetTransfers(value: unknown): SheetTransferLike[] {
       ]),
     }))
     .filter((row) => Number.isFinite(row.amount));
+}
+
+async function getMerchantMemoryForAccount(bankAccountName: string): Promise<MerchantMemoryEntry[]> {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString || !bankAccountName) return [];
+  try {
+    const sql = neon(connectionString);
+    const rows = (await sql`
+      SELECT fingerprint, bank_account_name, sheet_category, sheet_account, confirmed_count
+      FROM reconciliation_merchant_memory
+      WHERE bank_account_name = ${bankAccountName}
+        AND confirmed_count >= 2
+    `) as Array<{
+      fingerprint: string;
+      bank_account_name: string;
+      sheet_category: string | null;
+      sheet_account: string | null;
+      confirmed_count: number;
+    }>;
+    return rows.map((row) => ({
+      fingerprint: row.fingerprint,
+      bankAccountName: row.bank_account_name,
+      confirmedCount: Number(row.confirmed_count ?? 0),
+      sheetCategory: row.sheet_category,
+      sheetAccount: row.sheet_account,
+    }));
+  } catch {
+    // Memory table missing — proceed without memory-based matching.
+    return [];
+  }
 }
 
 async function getClaimedExpenseRowIds(): Promise<Set<string>> {
@@ -267,6 +298,7 @@ export async function POST(request: NextRequest) {
 
   const claimedExpenseRowIds = await getClaimedExpenseRowIds();
   const transferClaimStatusByRowId = await getTransferClaimStatusByRowId();
+  const merchantMemory = await getMerchantMemoryForAccount(accountName);
   const unclaimedSheetExpenses = sheetExpenses.filter((row) => {
     const rowId = (row.rowId ?? "").trim();
     if (!rowId) return true;
@@ -355,6 +387,7 @@ export async function POST(request: NextRequest) {
     processedHashes,
     sheetTransfers: availableSheetTransfers,
     transferClaimStatusByRowId,
+    merchantMemory,
   });
   const matches = [...claimedMatches, ...matcherMatches];
   return NextResponse.json({ bankTransactions, matches });
