@@ -3856,7 +3856,18 @@ export default function ReconcilePage() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     multiple: false,
-    accept: { "text/csv": [".csv"] },
+    // Accept CSV regardless of MIME type — Windows often reports text/plain or
+    // application/vnd.ms-excel for .csv files, which would silently reject them.
+    accept: {
+      "text/csv": [".csv"],
+      "text/plain": [".csv"],
+      "application/vnd.ms-excel": [".csv"],
+      "application/csv": [".csv"],
+    },
+    onDropRejected: (rejections) => {
+      const firstName = rejections[0]?.file?.name ?? "file";
+      setUploadError(`"${firstName}" was rejected — make sure it is a .csv file.`);
+    },
   });
 
   const activeReviewRows = (statementReviewRowsByAccount[activeTab] ?? []).filter(
