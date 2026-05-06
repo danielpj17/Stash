@@ -620,6 +620,8 @@ export default function ReconcilePage() {
   const [selectedAccount, setSelectedAccount] = useState<AccountOption>("WF Checking");
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const matchedSectionRef = useRef<HTMLElement | null>(null);
+  const [shouldScrollToMatched, setShouldScrollToMatched] = useState(false);
   const [matchesByAccount, setMatchesByAccount] = useState<Record<string, MatchResult[]>>({});
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
@@ -1377,6 +1379,12 @@ export default function ReconcilePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!shouldScrollToMatched) return;
+    setShouldScrollToMatched(false);
+    matchedSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [shouldScrollToMatched]);
 
   const allMatches = useMemo(() => Object.values(matchesByAccount).flat(), [matchesByAccount]);
 
@@ -3813,6 +3821,7 @@ export default function ReconcilePage() {
             [selectedAccount]: mergeMatchArrays(prev[selectedAccount], data.matches),
           }),
         );
+        setShouldScrollToMatched(true);
 
         // Persist CSV rows + match results to Neon (independent so one failure doesn't block the other).
         const neonErrors: string[] = [];
@@ -4586,15 +4595,28 @@ export default function ReconcilePage() {
                 )}
                 {bulkError && <p className="text-amber-300 text-xs mb-2">{bulkError}</p>}
                 {activeReviewRows.length === 0 ? (
-                  <p className="text-gray-400">
-                    No rows requiring manual review for this account.
+                  <div>
+                    <p className="text-gray-400">No rows requiring manual review for this account.</p>
                     {(activeUserLinkedMatchedRows.length > 0 || activeStatementClosedOnlyRows.length > 0) && (
-                      <span className="block mt-1 text-xs text-gray-500">
-                        {activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length} transaction
-                        {activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length === 1 ? "" : "s"} already reconciled — see the sections below.
-                      </span>
+                      <div className="mt-3 rounded-lg border border-charcoal-dark bg-[#2a2a2a] px-4 py-3 flex items-center justify-between gap-3">
+                        <p className="text-sm text-gray-300">
+                          <span className="text-green-400 font-medium">
+                            {activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length}
+                          </span>{" "}
+                          transaction{activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length === 1 ? "" : "s"} already reconciled.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            matchedSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-accent/20 border border-accent/40 text-accent text-xs font-medium hover:bg-accent/30 transition-colors shrink-0"
+                        >
+                          View matched ↓
+                        </button>
+                      </div>
                     )}
-                  </p>
+                  </div>
                 ) : (
                   <div className="space-y-2">
                     {activeReviewRows.filter((m) => filterMatchForBulk(m, bulkFilter)).map((match, index) => {
@@ -4753,7 +4775,7 @@ export default function ReconcilePage() {
               </div>
             </section>
 
-            <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
+            <section ref={matchedSectionRef} className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
               <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
                 <h2 className="text-white font-semibold">{activeTab}: Matched to sheet</h2>
                 <span className="text-xs text-gray-300">{activeUserLinkedMatchedRows.length}</span>
