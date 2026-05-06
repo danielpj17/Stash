@@ -3768,6 +3768,22 @@ export default function ReconcilePage() {
           throw new Error(err.error || `Failed to match CSV (${res.status})`);
         }
         const data = (await res.json()) as MatchResponse;
+        // Debug: log match summary to console so issues can be diagnosed.
+        const matchSummary = data.matches.reduce(
+          (acc, m) => { acc[m.matchType] = (acc[m.matchType] ?? 0) + 1; return acc; },
+          {} as Record<string, number>,
+        );
+        console.debug(
+          `[reconcile] CSV upload for ${selectedAccount}: ${data.bankTransactions.length} bank txns,`,
+          `${data.matches.length} matches:`, matchSummary,
+        );
+        if (data.bankTransactions.length === 0) {
+          setUploadError(
+            `No transactions were parsed from this file. ` +
+            `Make sure you selected the correct account (currently "${selectedAccount}") ` +
+            `or that the CSV is in the correct format.`,
+          );
+        }
         const autoApprovable = data.matches.filter(
           (match) => match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match),
         );
@@ -4570,7 +4586,15 @@ export default function ReconcilePage() {
                 )}
                 {bulkError && <p className="text-amber-300 text-xs mb-2">{bulkError}</p>}
                 {activeReviewRows.length === 0 ? (
-                  <p className="text-gray-400">No rows requiring manual review for this account.</p>
+                  <p className="text-gray-400">
+                    No rows requiring manual review for this account.
+                    {(activeUserLinkedMatchedRows.length > 0 || activeStatementClosedOnlyRows.length > 0) && (
+                      <span className="block mt-1 text-xs text-gray-500">
+                        {activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length} transaction
+                        {activeUserLinkedMatchedRows.length + activeStatementClosedOnlyRows.length === 1 ? "" : "s"} already reconciled — see the sections below.
+                      </span>
+                    )}
+                  </p>
                 ) : (
                   <div className="space-y-2">
                     {activeReviewRows.filter((m) => filterMatchForBulk(m, bulkFilter)).map((match, index) => {
