@@ -281,6 +281,10 @@ function isCapitalOneProfile(accountName: string): boolean {
   return accountName.trim().toLowerCase() === "capital one";
 }
 
+function isWellsFargoProfile(accountName: string): boolean {
+  return accountName.trim().toLowerCase() === "wells fargo";
+}
+
 function resolveVenmoProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
   if (!Array.isArray(rows) || !isProfileConfigured(fallback)) {
     return { profile: fallback, startRowIndex: 0 };
@@ -340,6 +344,26 @@ function resolveCapitalOneProfile(rows: string[][], fallback: BankProfile): Reso
           debitIndex,
           creditIndex,
         },
+        startRowIndex: i + 1,
+      };
+    }
+  }
+
+  return { profile: fallback, startRowIndex: 0 };
+}
+
+function resolveWellsFargoProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
+  if (!Array.isArray(rows)) return { profile: fallback, startRowIndex: 0 };
+
+  for (let i = 0; i < Math.min(rows.length, 3); i += 1) {
+    const row = rows[i] ?? [];
+    const normalized = row.map((cell) => normalizeHeaderCell(cell));
+    const dateIndex = normalized.findIndex((cell) => cell === "date");
+    const descriptionIndex = normalized.findIndex((cell) => cell === "description");
+    const amountIndex = normalized.findIndex((cell) => cell === "amount");
+    if (dateIndex >= 0 && descriptionIndex >= 0 && amountIndex >= 0) {
+      return {
+        profile: { dateIndex, amountIndex, descriptionIndex },
         startRowIndex: i + 1,
       };
     }
@@ -525,7 +549,9 @@ export function mapBankRowsToTransactions(
     ? resolveVenmoProfile(rows, fallbackProfile)
     : isCapitalOneProfile(String(accountName))
       ? resolveCapitalOneProfile(rows, fallbackProfile)
-      : { profile: fallbackProfile, startRowIndex: 0 };
+      : isWellsFargoProfile(String(accountName))
+        ? resolveWellsFargoProfile(rows, fallbackProfile)
+        : { profile: fallbackProfile, startRowIndex: 0 };
 
   return rows
     .slice(resolved.startRowIndex)
