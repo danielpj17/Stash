@@ -352,25 +352,6 @@ function resolveCapitalOneProfile(rows: string[][], fallback: BankProfile): Reso
   return { profile: fallback, startRowIndex: 0 };
 }
 
-function resolveWellsFargoProfile(rows: string[][], fallback: BankProfile): ResolvedBankProfile {
-  if (!Array.isArray(rows)) return { profile: fallback, startRowIndex: 0 };
-
-  for (let i = 0; i < Math.min(rows.length, 3); i += 1) {
-    const row = rows[i] ?? [];
-    const normalized = row.map((cell) => normalizeHeaderCell(cell));
-    const dateIndex = normalized.findIndex((cell) => cell === "date");
-    const descriptionIndex = normalized.findIndex((cell) => cell === "description");
-    const amountIndex = normalized.findIndex((cell) => cell === "amount");
-    if (dateIndex >= 0 && descriptionIndex >= 0 && amountIndex >= 0) {
-      return {
-        profile: { dateIndex, amountIndex, descriptionIndex },
-        startRowIndex: i + 1,
-      };
-    }
-  }
-
-  return { profile: fallback, startRowIndex: 0 };
-}
 
 function formatDateKeyFromDate(date: Date): string {
   const year = date.getUTCFullYear();
@@ -545,13 +526,25 @@ export function mapBankRowsToTransactions(
   const fallbackProfile = BANK_PROFILES[accountName];
   if (!fallbackProfile || !isProfileConfigured(fallbackProfile)) return [];
 
+  // Wells Fargo changed CSV format: old format has amount at col 1, new format has
+  // a header row (DATE, DESCRIPTION, AMOUNT, ...) with description at col 1 and amount at col 2.
+  // The stored mergedCsv can contain both formats simultaneously, so we detect per-row.
+  if (isWellsFargoProfile(String(accountName))) {
+    const newFormatProfile: BankProfile = { dateIndex: 0, amountIndex: 2, descriptionIndex: 1 };
+    return rows.flatMap((row): BankTransaction[] => {
+      // Old format: col 1 is a numeric amount. New format: col 1 is description text.
+      const isOldFormat = parseBankAmount(String(row[1] ?? "")) !== null;
+      const profile = isOldFormat ? fallbackProfile : newFormatProfile;
+      const tx = mapBankRowToTransaction(accountName, row, profile);
+      return tx ? [tx] : [];
+    });
+  }
+
   const resolved = isVenmoProfile(String(accountName))
     ? resolveVenmoProfile(rows, fallbackProfile)
     : isCapitalOneProfile(String(accountName))
       ? resolveCapitalOneProfile(rows, fallbackProfile)
-      : isWellsFargoProfile(String(accountName))
-        ? resolveWellsFargoProfile(rows, fallbackProfile)
-        : { profile: fallbackProfile, startRowIndex: 0 };
+      : { profile: fallbackProfile, startRowIndex: 0 };
 
   return rows
     .slice(resolved.startRowIndex)
