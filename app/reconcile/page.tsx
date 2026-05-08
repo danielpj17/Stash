@@ -82,7 +82,7 @@ type TransferClaimModalState = {
   expectedLegs: 1 | 2;
   submitting: boolean;
   error: string;
-  pendingManualClaim: boolean;
+  pendingClaimSource: null | "manual" | "split";
 };
 
 type TransferClaimStatusByRowId = Record<
@@ -684,7 +684,7 @@ export default function ReconcilePage() {
     expectedLegs: 2,
     submitting: false,
     error: "",
-    pendingManualClaim: false,
+    pendingClaimSource: null,
   });
   const [anchorModal, setAnchorModal] = useState<AnchorModalState>({
     open: false,
@@ -1979,7 +1979,7 @@ export default function ReconcilePage() {
       expectedLegs,
       submitting: false,
       error: "",
-      pendingManualClaim: false,
+      pendingClaimSource: null,
     });
   }, [transferClaimStatusByRowId]);
 
@@ -1990,7 +1990,7 @@ export default function ReconcilePage() {
       expectedLegs: 2,
       submitting: false,
       error: "",
-      pendingManualClaim: false,
+      pendingClaimSource: null,
     });
   }, []);
 
@@ -2321,7 +2321,7 @@ export default function ReconcilePage() {
         expectedLegs: existingLegs,
         submitting: false,
         error: "",
-        pendingManualClaim: true,
+        pendingClaimSource: "manual",
       });
     } else {
       void handleUserStatementClaimSubmit();
@@ -3388,7 +3388,7 @@ export default function ReconcilePage() {
     });
   }, []);
 
-  const handleSplitSubmit = useCallback(async () => {
+  const handleSplitSubmit = useCallback(async (overrideLegs?: 1 | 2) => {
     if (!splitModal.rowId) return;
     const selected = allMatches.find((m) => idForTx(m.bankTransaction) === splitModal.rowId);
     if (!selected) {
@@ -3462,7 +3462,7 @@ export default function ReconcilePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             transferRowId: tr.rowId,
-            expectedLegs: splitModal.transferExpectedLegs,
+            expectedLegs: overrideLegs ?? splitModal.transferExpectedLegs,
             bankTransaction: {
               hash: selected.bankTransaction.hash,
               accountName: selected.bankTransaction.accountName,
@@ -3588,11 +3588,32 @@ export default function ReconcilePage() {
     splitModal.candidates,
   ]);
 
+  const handleSplitSaveClick = useCallback(() => {
+    if (splitSelectionIncludesTransfer) {
+      setTransferClaimModal({
+        open: true,
+        rowId: null,
+        expectedLegs: splitModal.transferExpectedLegs,
+        submitting: false,
+        error: "",
+        pendingClaimSource: "split",
+      });
+    } else {
+      void handleSplitSubmit();
+    }
+  }, [handleSplitSubmit, splitModal.transferExpectedLegs, splitSelectionIncludesTransfer]);
+
   const handleTransferClaimSubmit = useCallback(async () => {
-    if (transferClaimModal.pendingManualClaim) {
+    if (transferClaimModal.pendingClaimSource === "manual") {
       const legs = transferClaimModal.expectedLegs;
       closeTransferClaimModal();
       void handleUserStatementClaimSubmit(legs);
+      return;
+    }
+    if (transferClaimModal.pendingClaimSource === "split") {
+      const legs = transferClaimModal.expectedLegs;
+      closeTransferClaimModal();
+      void handleSplitSubmit(legs);
       return;
     }
     if (!transferClaimModal.rowId) return;
@@ -3674,7 +3695,7 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to claim transfer.",
       }));
     }
-  }, [allMatches, closeTransferClaimModal, handleUserStatementClaimSubmit, rematchAllStoredAccounts, transferClaimModal]);
+  }, [allMatches, closeTransferClaimModal, handleSplitSubmit, handleUserStatementClaimSubmit, rematchAllStoredAccounts, transferClaimModal]);
 
   const onDrop = useCallback(
     async (files: File[]) => {
@@ -5581,40 +5602,6 @@ export default function ReconcilePage() {
                 </span>
               </div>
 
-              {splitSelectionIncludesTransfer && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-2">
-                  <p className="text-xs text-amber-100/90">
-                    This claim links a <span className="font-medium">Transfers</span> sheet row. How many
-                    bank legs should this transfer need?
-                  </p>
-                  <div className="flex flex-wrap gap-4 text-sm text-gray-200">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="split-transfer-legs"
-                        checked={splitModal.transferExpectedLegs === 2}
-                        onChange={() =>
-                          setSplitModal((prev) => ({ ...prev, transferExpectedLegs: 2, error: "" }))
-                        }
-                        disabled={splitModal.submitting}
-                      />
-                      Two legs (typical between two accounts)
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="split-transfer-legs"
-                        checked={splitModal.transferExpectedLegs === 1}
-                        onChange={() =>
-                          setSplitModal((prev) => ({ ...prev, transferExpectedLegs: 1, error: "" }))
-                        }
-                        disabled={splitModal.submitting}
-                      />
-                      One leg only
-                    </label>
-                  </div>
-                </div>
-              )}
 
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Search rows</label>
@@ -5685,7 +5672,7 @@ export default function ReconcilePage() {
               </button>
               <button
                 type="button"
-                onClick={handleSplitSubmit}
+                onClick={handleSplitSaveClick}
                 disabled={splitModal.submitting}
                 className="px-3 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent-dark transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
               >
