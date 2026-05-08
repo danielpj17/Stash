@@ -173,6 +173,7 @@ const CSV_PARSER_READY_ACCOUNTS = new Set<AccountOption>([
   "WF Savings",
   "Venmo - Daniel",
   "Venmo - Katie",
+  "Capital One",
 ]);
 const RECONCILE_STORAGE_KEY = "reconcile-page-state-v3";
 
@@ -4523,11 +4524,6 @@ export default function ReconcilePage() {
                       <p className="text-xs text-gray-400 mt-1">
                         Unmatched / suggested: {reviewRows.length}
                       </p>
-                      {reviewRows.length === 0 && !hasParser && (
-                        <p className="text-[11px] text-yellow-300/90 mt-1">
-                          Statement CSV parser not configured yet for this account.
-                        </p>
-                      )}
                     </div>
                   );
                 })}
