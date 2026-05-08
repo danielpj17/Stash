@@ -77,6 +77,10 @@ export async function POST(request: NextRequest) {
     `) as Array<{ hash: string }>;
     const wasAlreadyProcessed = existing.length > 0;
 
+    if (wasAlreadyProcessed) {
+      return NextResponse.json({ success: true, hash, actionId: null, skipped: true });
+    }
+
     const { id: actionId, query: logInsert } = buildActivityLogInsert(sql, {
       actionType: "processed_mark",
       actor,

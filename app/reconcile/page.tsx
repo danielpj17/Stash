@@ -82,6 +82,7 @@ type TransferClaimModalState = {
   expectedLegs: 1 | 2;
   submitting: boolean;
   error: string;
+  pendingManualClaim: boolean;
 };
 
 type TransferClaimStatusByRowId = Record<
@@ -683,6 +684,7 @@ export default function ReconcilePage() {
     expectedLegs: 2,
     submitting: false,
     error: "",
+    pendingManualClaim: false,
   });
   const [anchorModal, setAnchorModal] = useState<AnchorModalState>({
     open: false,
@@ -1977,6 +1979,7 @@ export default function ReconcilePage() {
       expectedLegs,
       submitting: false,
       error: "",
+      pendingManualClaim: false,
     });
   }, [transferClaimStatusByRowId]);
 
@@ -1987,6 +1990,7 @@ export default function ReconcilePage() {
       expectedLegs: 2,
       submitting: false,
       error: "",
+      pendingManualClaim: false,
     });
   }, []);
 
@@ -2114,8 +2118,9 @@ export default function ReconcilePage() {
     [recordMerchantMemory],
   );
 
-  const handleUserStatementClaimSubmit = useCallback(async () => {
-    const { entry, selectedBankRowId, transferExpectedLegs } = userStatementClaimModal;
+  const handleUserStatementClaimSubmit = useCallback(async (overrideLegs?: 1 | 2) => {
+    const { entry, selectedBankRowId } = userStatementClaimModal;
+    const transferExpectedLegs = overrideLegs ?? userStatementClaimModal.transferExpectedLegs;
     if (!entry || !selectedBankRowId) {
       setUserStatementClaimModal((prev) => ({ ...prev, error: "Select a statement line." }));
       return;
@@ -2306,6 +2311,22 @@ export default function ReconcilePage() {
     sheetTransfers,
     userStatementClaimModal,
   ]);
+
+  const handleUserStatementClaimSaveClick = useCallback(() => {
+    if (userStatementClaimModal.entry?.source === "Transfers") {
+      const existingLegs = userStatementClaimModal.transferExpectedLegs;
+      setTransferClaimModal({
+        open: true,
+        rowId: null,
+        expectedLegs: existingLegs,
+        submitting: false,
+        error: "",
+        pendingManualClaim: true,
+      });
+    } else {
+      void handleUserStatementClaimSubmit();
+    }
+  }, [handleUserStatementClaimSubmit, userStatementClaimModal]);
 
   const rematchAllStoredAccounts = useCallback(async () => {
     const accounts = Object.keys(statementCsvRowsByAccountRef.current);
@@ -3568,6 +3589,12 @@ export default function ReconcilePage() {
   ]);
 
   const handleTransferClaimSubmit = useCallback(async () => {
+    if (transferClaimModal.pendingManualClaim) {
+      const legs = transferClaimModal.expectedLegs;
+      closeTransferClaimModal();
+      void handleUserStatementClaimSubmit(legs);
+      return;
+    }
     if (!transferClaimModal.rowId) return;
     const selected = allMatches.find((m) => idForTx(m.bankTransaction) === transferClaimModal.rowId);
     if (!selected) {
@@ -3647,7 +3674,7 @@ export default function ReconcilePage() {
         error: err instanceof Error ? err.message : "Failed to claim transfer.",
       }));
     }
-  }, [allMatches, closeTransferClaimModal, rematchAllStoredAccounts, transferClaimModal]);
+  }, [allMatches, closeTransferClaimModal, handleUserStatementClaimSubmit, rematchAllStoredAccounts, transferClaimModal]);
 
   const onDrop = useCallback(
     async (files: File[]) => {
@@ -5707,47 +5734,6 @@ export default function ReconcilePage() {
                 Lists unprocessed statement lines (all accounts when Account is All) whose amount matches this
                 entry. Search and account filter narrow the list.
               </p>
-              {userStatementClaimModal.entry.source === "Transfers" && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-2">
-                  <p className="text-xs text-amber-100/90">
-                    How many bank legs should this transfer need?
-                  </p>
-                  <div className="flex flex-wrap gap-4 text-sm text-gray-200">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="user-claim-transfer-legs"
-                        checked={userStatementClaimModal.transferExpectedLegs === 2}
-                        onChange={() =>
-                          setUserStatementClaimModal((prev) => ({
-                            ...prev,
-                            transferExpectedLegs: 2,
-                            error: "",
-                          }))
-                        }
-                        disabled={userStatementClaimModal.submitting}
-                      />
-                      Two legs
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="user-claim-transfer-legs"
-                        checked={userStatementClaimModal.transferExpectedLegs === 1}
-                        onChange={() =>
-                          setUserStatementClaimModal((prev) => ({
-                            ...prev,
-                            transferExpectedLegs: 1,
-                            error: "",
-                          }))
-                        }
-                        disabled={userStatementClaimModal.submitting}
-                      />
-                      One leg only
-                    </label>
-                  </div>
-                </div>
-              )}
               <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
                 <div className="flex-1 min-w-0">
                   <label className="block text-xs text-gray-400 mb-1">Search statement lines</label>
@@ -5846,7 +5832,7 @@ export default function ReconcilePage() {
               </button>
               <button
                 type="button"
-                onClick={() => void handleUserStatementClaimSubmit()}
+                onClick={handleUserStatementClaimSaveClick}
                 disabled={userStatementClaimModal.submitting}
                 className="px-3 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent-dark transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
               >
