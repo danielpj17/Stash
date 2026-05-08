@@ -519,6 +519,17 @@ export function mapBankRowToTransaction(
   };
 }
 
+// When two rows produce identical hashes (same date/amount/description), append -2, -3, etc.
+// so each transaction gets a unique, stable key for Neon storage.
+function disambiguateHashes(txs: BankTransaction[]): BankTransaction[] {
+  const seen = new Map<string, number>();
+  return txs.map((tx) => {
+    const count = (seen.get(tx.hash) ?? 0) + 1;
+    seen.set(tx.hash, count);
+    return count > 1 ? { ...tx, hash: `${tx.hash}-${count}` } : tx;
+  });
+}
+
 export function mapBankRowsToTransactions(
   accountName: keyof typeof BANK_PROFILES | string,
   rows: string[][],
@@ -531,13 +542,13 @@ export function mapBankRowsToTransactions(
   // The stored mergedCsv can contain both formats simultaneously, so we detect per-row.
   if (isWellsFargoProfile(String(accountName))) {
     const newFormatProfile: BankProfile = { dateIndex: 0, amountIndex: 2, descriptionIndex: 1 };
-    return rows.flatMap((row): BankTransaction[] => {
+    return disambiguateHashes(rows.flatMap((row): BankTransaction[] => {
       // Old format: col 1 is a numeric amount. New format: col 1 is description text.
       const isOldFormat = parseBankAmount(String(row[1] ?? "")) !== null;
       const profile = isOldFormat ? fallbackProfile : newFormatProfile;
       const tx = mapBankRowToTransaction(accountName, row, profile);
       return tx ? [tx] : [];
-    });
+    }));
   }
 
   const resolved = isVenmoProfile(String(accountName))
@@ -546,10 +557,12 @@ export function mapBankRowsToTransactions(
       ? resolveCapitalOneProfile(rows, fallbackProfile)
       : { profile: fallbackProfile, startRowIndex: 0 };
 
-  return rows
-    .slice(resolved.startRowIndex)
-    .map((row) => mapBankRowToTransaction(accountName, row, resolved.profile))
-    .filter((tx): tx is BankTransaction => tx !== null);
+  return disambiguateHashes(
+    rows
+      .slice(resolved.startRowIndex)
+      .map((row) => mapBankRowToTransaction(accountName, row, resolved.profile))
+      .filter((tx): tx is BankTransaction => tx !== null),
+  );
 }
 
 async function getProcessedTransactionHashes(): Promise<Set<string>> {
