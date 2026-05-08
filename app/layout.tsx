@@ -19,6 +19,7 @@ export const metadata: Metadata = {
     title: "Stash",
   },
   icons: {
+    icon: { url: "/favicon.svg", type: "image/svg+xml" },
     apple: "/icons/apple-touch-icon.png",
   },
 };

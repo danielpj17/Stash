@@ -3941,7 +3941,7 @@ export default function ReconcilePage() {
         // Persist CSV rows + match results to Neon (independent so one failure doesn't block the other).
         const neonErrors: string[] = [];
         try {
-          await saveMatchCacheToNeon(selectedAccount, data.matches);
+          await saveMatchCacheToNeon(selectedAccount, data.matches, true);
         } catch (e) {
           neonErrors.push(`match-cache: ${e instanceof Error ? e.message : String(e)}`);
         }
