@@ -622,7 +622,6 @@ export default function ReconcilePage() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const matchedSectionRef = useRef<HTMLElement | null>(null);
-  const [shouldScrollToMatched, setShouldScrollToMatched] = useState(false);
   const [matchesByAccount, setMatchesByAccount] = useState<Record<string, MatchResult[]>>({});
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
@@ -1381,12 +1380,6 @@ export default function ReconcilePage() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!shouldScrollToMatched) return;
-    setShouldScrollToMatched(false);
-    matchedSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [shouldScrollToMatched]);
 
   const allMatches = useMemo(() => Object.values(matchesByAccount).flat(), [matchesByAccount]);
 
@@ -3869,8 +3862,6 @@ export default function ReconcilePage() {
             [selectedAccount]: mergeMatchArrays(prev[selectedAccount], data.matches),
           }),
         );
-        setShouldScrollToMatched(true);
-
         // Persist CSV rows + match results to Neon (independent so one failure doesn't block the other).
         const neonErrors: string[] = [];
         try {
