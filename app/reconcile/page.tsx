@@ -2957,6 +2957,57 @@ export default function ReconcilePage() {
     [openTransferClaimModal, persistProcessedHash, refreshBankHashesWithNeonClaim, sheetExpenses, sheetTransfers],
   );
 
+  const handleClearFile = useCallback(
+    async (accountName: string, fileName: string) => {
+      if (!window.confirm(`Clear all reconciliation data for "${fileName}"? This removes all claim links and processed markers for transactions from this file so you can re-upload and re-reconcile them.`)) return;
+      try {
+        const res = await fetch("/api/reconciliation/uploaded-files", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountName, fileName }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          setActionError(err.error || `Failed to clear file (${res.status})`);
+          return;
+        }
+        const { clearedHashes } = (await res.json()) as { clearedHashes: string[] };
+        const clearedSet = new Set(clearedHashes ?? []);
+
+        // Remove cleared hashes from processed state.
+        if (clearedSet.size > 0) {
+          setProcessedHashes((prev) => {
+            const next = new Set(prev);
+            for (const h of clearedSet) next.delete(h);
+            return next;
+          });
+          // Remove cleared transactions from match state so they drop out of the UI.
+          setMatchesByAccount((prev) => {
+            const next: Record<string, MatchResult[]> = {};
+            for (const [acct, rows] of Object.entries(prev)) {
+              next[acct] = rows.filter((m) => !clearedSet.has(m.bankTransaction.hash));
+            }
+            return next;
+          });
+          setBankHashesWithNeonClaim((prev) => {
+            const next = new Set(prev);
+            for (const h of clearedSet) next.delete(h);
+            return next;
+          });
+        }
+
+        // Remove the file from the list.
+        setUploadedFilesByAccount((prev) => ({
+          ...prev,
+          [accountName]: (prev[accountName] ?? []).filter((f) => f !== fileName),
+        }));
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Failed to clear file.");
+      }
+    },
+    [],
+  );
+
   const handleDisconnectSheetLink = useCallback(
     async (match: MatchResult) => {
       if (typeof window !== "undefined") {
@@ -3992,6 +4043,7 @@ export default function ReconcilePage() {
             body: JSON.stringify({
               accountName: selectedAccount,
               fileName: uploadedFileName,
+              bankHashes: data.bankTransactions.map((tx) => tx.hash),
             }),
           });
           setUploadedFilesByAccount((prev) => {
@@ -4160,10 +4212,18 @@ export default function ReconcilePage() {
                     {selectedAccountUploadedFiles.map((fileName) => (
                       <div
                         key={fileName}
-                        className="rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2 text-gray-200 truncate"
+                        className="flex items-center gap-2 rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-3 py-2"
                         title={fileName}
                       >
-                        {fileName}
+                        <span className="flex-1 text-gray-200 truncate">{fileName}</span>
+                        <button
+                          type="button"
+                          title="Clear all reconciliation data for this file"
+                          onClick={() => void handleClearFile(selectedAccount, fileName)}
+                          className="flex-shrink-0 text-gray-500 hover:text-red-400 transition-colors"
+                        >
+                          ✕
+                        </button>
                       </div>
                     ))}
                   </div>
