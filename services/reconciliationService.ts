@@ -630,7 +630,10 @@ export async function findMatches(
   for (const tx of bankTransactions) {
     const txDate = normalizeDateOnly(tx.date);
     const exactKey = `${amountKey(tx.amount)}|${txDate}`;
-    const exactSheet = exactSheetIndex.get(exactKey)?.[0];
+    const exactSheet = (exactSheetIndex.get(exactKey) ?? []).find((row) => {
+      const rowId = String(row.rowId ?? "").trim();
+      return !rowId || !consumedRowIds.has(rowId);
+    });
     const exactSheetIndexValue = exactSheet
       ? sheetExpenses.findIndex((row) => row === exactSheet)
       : -1;

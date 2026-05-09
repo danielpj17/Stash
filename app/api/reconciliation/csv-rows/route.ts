@@ -85,11 +85,16 @@ export async function POST(request: NextRequest) {
   }
 
   const validRows: Array<{ key: string; cells: string[] }> = [];
+  const occurrenceCount = new Map<string, number>();
   for (const row of body.rows) {
     if (!Array.isArray(row)) continue;
     const cells = row.map((c: unknown) => (c === null || c === undefined ? "" : String(c)));
-    const key = csvRowDedupeKey(cells);
-    if (key) validRows.push({ key, cells });
+    const base = csvRowDedupeKey(cells);
+    if (!base) continue;
+    const n = occurrenceCount.get(base) ?? 0;
+    occurrenceCount.set(base, n + 1);
+    const key = n === 0 ? base : `${base}|${n}`;
+    validRows.push({ key, cells });
   }
 
   if (validRows.length === 0) {

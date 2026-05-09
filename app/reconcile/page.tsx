@@ -258,16 +258,26 @@ function csvRowDedupeKey(row: string[]): string {
   return row.map((c) => String(c).trim()).join("\t");
 }
 
-/** Merge multiple CSV uploads per account; same row shape deduped, newest upload wins per key. */
+/** Merge multiple CSV uploads per account; same row shape deduped, newest upload wins per key.
+ *  Identical rows within the same batch get occurrence-indexed keys (base, base|1, base|2, …)
+ *  so that two truly identical CSV lines (same date/amount/description) are both preserved. */
 function mergeCsvRowArrays(existing: string[][] | undefined, incoming: string[][]): string[][] {
   const byKey = new Map<string, string[]>();
+  const existingCount = new Map<string, number>();
   for (const row of existing ?? []) {
-    const key = csvRowDedupeKey(row);
-    if (key) byKey.set(key, row);
+    const base = csvRowDedupeKey(row);
+    if (!base) continue;
+    const n = existingCount.get(base) ?? 0;
+    existingCount.set(base, n + 1);
+    byKey.set(n === 0 ? base : `${base}|${n}`, row);
   }
+  const incomingCount = new Map<string, number>();
   for (const row of incoming) {
-    const key = csvRowDedupeKey(row);
-    if (key) byKey.set(key, row);
+    const base = csvRowDedupeKey(row);
+    if (!base) continue;
+    const n = incomingCount.get(base) ?? 0;
+    incomingCount.set(base, n + 1);
+    byKey.set(n === 0 ? base : `${base}|${n}`, row);
   }
   return Array.from(byKey.values());
 }
@@ -642,6 +652,16 @@ export default function ReconcilePage() {
   const [matchesByAccount, setMatchesByAccount] = useState<Record<string, MatchResult[]>>({});
   const [activeTab, setActiveTab] = useState<string>(ACCOUNT_OPTIONS[0]);
   const [viewMode, setViewMode] = useState<ReconcileViewMode>("home");
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const accountParam = params.get("account");
+    if (accountParam && ACCOUNT_OPTIONS.includes(accountParam as AccountOption)) {
+      setSelectedAccount(accountParam as AccountOption);
+      setActiveTab(accountParam);
+      setViewMode("accountDetail");
+    }
+  }, []);
   const [dismissalNotesById, setDismissalNotesById] = useState<Record<string, string>>({});
   const [userDismissedRowKeys, setUserDismissedRowKeys] = useState<Set<string>>(new Set());
   const [userDismissalNotesByEntryId, setUserDismissalNotesByEntryId] = useState<Record<string, string>>(
@@ -4082,12 +4102,14 @@ export default function ReconcilePage() {
               onChange={(nextValue) => {
                 if (nextValue === ALL_ACCOUNTS_OPTION) {
                   setViewMode("home");
+                  history.replaceState(null, "", window.location.pathname);
                   return;
                 }
                 const account = nextValue as AccountOption;
                 setSelectedAccount(account);
                 setActiveTab(account);
                 setViewMode("accountDetail");
+                history.replaceState(null, "", `${window.location.pathname}?account=${encodeURIComponent(account)}`);
               }}
               options={ACCOUNT_DROPDOWN_OPTIONS}
               className="min-w-[10rem]"
@@ -4600,6 +4622,7 @@ export default function ReconcilePage() {
                               setSelectedAccount(account as AccountOption);
                             }
                             setViewMode("accountDetail");
+                            history.replaceState(null, "", `${window.location.pathname}?account=${encodeURIComponent(account)}`);
                           }}
                           className="px-2.5 py-1 rounded-md text-xs text-blue-300 hover:text-blue-200 hover:bg-blue-500/10 transition-colors"
                         >
@@ -4623,7 +4646,10 @@ export default function ReconcilePage() {
                 <span className="text-xs text-gray-300">{activeReviewRows.length}</span>
                 <button
                   type="button"
-                  onClick={() => setViewMode("home")}
+                  onClick={() => {
+                    setViewMode("home");
+                    history.replaceState(null, "", window.location.pathname);
+                  }}
                   className="px-2.5 py-1 rounded-md text-xs text-gray-300 hover:text-white hover:bg-[#2c2c2c] transition-colors"
                 >
                   Back to home
