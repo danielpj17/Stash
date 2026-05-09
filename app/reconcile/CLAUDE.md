@@ -202,11 +202,25 @@ CREATE TABLE reconciliation_match_cache (
   PRIMARY KEY (account_name, bank_hash)
 );
 
--- Raw CSV rows per account (used for re-matching after transfer claims).
-CREATE TABLE csv_storage (
-  account_name TEXT PRIMARY KEY,
-  rows JSONB NOT NULL,
-  updated_at TIMESTAMP DEFAULT now()
+-- Raw CSV rows per account, keyed by occurrence-indexed content hash.
+-- Identical rows within one upload get keys "content", "content|1", "content|2", …
+-- so duplicate transactions (same date/amount/description) are stored as separate rows.
+CREATE TABLE reconciliation_csv_rows (
+  account_name TEXT NOT NULL,
+  dedupe_key   TEXT NOT NULL,
+  cells        JSONB NOT NULL,
+  created_at   TIMESTAMP DEFAULT now(),
+  PRIMARY KEY (account_name, dedupe_key)
+);
+
+-- Upload history per account. bank_hashes stores every tx hash from that upload
+-- so individual files can be selectively cleared (DELETE /api/reconciliation/uploaded-files).
+CREATE TABLE reconciliation_uploaded_files (
+  account_name TEXT NOT NULL,
+  file_name    TEXT NOT NULL,
+  created_at   TIMESTAMP DEFAULT now(),
+  bank_hashes  JSONB,
+  PRIMARY KEY (account_name, file_name)
 );
 
 -- Statement ending balance anchors for account balance computation.
@@ -268,7 +282,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_log_csv
 | Schwab | Charles Schwab | — | — | No BANK_PROFILES entry — returns empty |
 | Ally | Ally | — | — | No BANK_PROFILES entry — returns empty |
 
-**Only WF Checking, WF Savings, Venmo - Daniel, and Venmo - Katie have working CSV parsers.** Other accounts can be added to `BANK_PROFILES` in `services/reconciliationService.ts`.
+**WF Checking, WF Savings, Venmo - Daniel, Venmo - Katie, and Capital One have working CSV parsers.** Other accounts can be added to `BANK_PROFILES` in `services/reconciliationService.ts`.
 
 ### Hash Generation (`generateTransactionHash`)
 
@@ -288,11 +302,16 @@ Wells Fargo posts transactions with a posting date, but embeds the actual purcha
 
 ### Description Cleaning
 
-Removes noise before matching:
+`cleanBankDescription()` in `services/reconciliationService.ts` removes noise before matching:
 - `PURCHASE AUTHORIZED ON MM/DD` prefix
-- Card numbers (4-digit sequences after spaces)
+- Reference codes (`ref #...`)
+- Card numbers (`card XXXX`)
 - ATM IDs and transaction refs
+- Alpha-prefixed long digit sequences (e.g., `B12345678`) — last 4 digits kept as `#NNNN` tag
+- Pure long digit sequences (10+ digits, e.g., `00624243319836`) — last 4 digits kept as `#NNNN` tag
 - Trailing whitespace
+
+The `#NNNN` tag preserves just enough of the stripped number to disambiguate duplicate transactions (e.g., two DELTA flights on the same day become `DELTA #9836` and `DELTA #9840`). The tag is stripped by `normalizeDescriptionForMatch` before Jaccard similarity scoring, so it doesn't affect matching against manually-entered Sheets descriptions.
 
 ### CSV MIME Type (Windows)
 
@@ -313,8 +332,10 @@ Before the main algorithm, each unclaimed bank transaction is checked against lo
 ### Step 1 — Exact Match (Sheet Expense)
 
 - Bank amount and date match a sheet expense row exactly
+- Finds the first **unclaimed** Sheets entry (skips rows already consumed by an earlier bank transaction in this batch)
 - Sheet row consumed from pool
 - `matchType: "exact_match"`
+- **Critical:** Two identical bank transactions (same amount + date) each get a distinct Sheets entry if two exist; the second falls through to later steps if no unclaimed entry remains.
 
 ### Step 2 — Processed Hash (Neon)
 
@@ -544,6 +565,16 @@ bulkError: string               // error message after partial failure
 
 - **In:** `{ accountName, rows: string[][] }`
 - Stores raw CSV for re-matching after transfer claims
+- **Identical rows within a batch get occurrence-indexed dedupe keys** (`base`, `base|1`, `base|2`, …) so two truly identical CSV lines (same date/amount/description) are both stored and generate separate bank transactions
+
+### `GET|POST|DELETE /api/reconciliation/uploaded-files`
+
+- GET: `{ filesByAccount: Record<string, string[]> }` — file names per account
+- POST: `{ accountName, fileName, bankHashes?: string[] }` — records upload; stores bank tx hashes so the file can be selectively cleared. Upserts on conflict (re-uploading same file name updates the stored hashes).
+- DELETE: `{ accountName, fileName }` — clears all reconciliation state for that file:
+  - Bulk-deletes from `claim_links`, `transfer_claim_links`, `processed_transactions`, `statement_dismissals`, `match_cache` for all stored bank hashes
+  - Deletes the file record
+  - Returns `{ clearedHashes: string[] }`
 
 ### `POST /api/reconciliation/reset`
 
@@ -686,7 +717,7 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 
 ### `onDrop(files)`
 
-1. Parses CSV with PapaParse; merges with existing stored CSV rows (newest rows win)
+1. Parses CSV with PapaParse; merges with existing stored CSV rows using **occurrence-indexed dedup** so identical rows are both kept
 2. Generates `csvUploadId` UUID for audit grouping
 3. Fetches fresh sheet data + all Neon state (processed hashes, claims, dismissals)
 4. POST `/match` with merged CSV + fresh sheet data
@@ -694,7 +725,15 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 6. `setMatchesByAccount` with new results; `setShouldScrollToMatched(true)` triggers scroll to matched section
 7. POST `/match-cache` + `/csv-rows` to Neon (independent; one failure doesn't block the other)
 8. `setProcessedHashes` updated with auto-approved hashes
-9. POST `/uploaded-files` to record file name
+9. POST `/uploaded-files` with file name **and `bankHashes`** (all tx hashes from this upload) so the file can later be selectively cleared
+
+### `handleClearFile(accountName, fileName)`
+
+- Shows a browser `confirm` dialog; on confirm calls DELETE `/api/reconciliation/uploaded-files`
+- Receives `clearedHashes: string[]` from the API
+- Surgically removes cleared hashes from `processedHashes`, `matchesByAccount`, and `bankHashesWithNeonClaim` state (no full rematch needed)
+- Removes the file from `uploadedFilesByAccount`
+- UI: ✕ button next to each file name in the Files panel
 
 ### `recordMerchantMemory(match, userEntry?)`
 
@@ -758,13 +797,20 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 3. Each action has an "Undo" button (greyed if already reverted)
 4. Undoing a `claim_create` removes the claim link and unmarks processed
 5. Undoing a `processed_create` removes the hash from `processed_transactions`
-6. Future: "Delete this CSV upload" cascades undo across all actions with the same `csv_upload_id`
+
+### Clear a Specific File
+
+1. Click the ✕ next to a file name in the Files panel
+2. Browser confirm dialog
+3. DELETE `/api/reconciliation/uploaded-files` removes all claim links, transfer claims, processed markers, dismissals, and cache entries for that file's bank transactions
+4. File disappears from the Files list; affected transactions drop out of the matched/closed sections
+5. Re-upload the file to re-reconcile from scratch
 
 ---
 
 ## Important Invariants & Gotchas
 
-- **Hash stability is critical.** All existing Neon records key off SHA256(date|amount|description). Never modify normalization logic without migrating stored hashes.
+- **Hash stability is critical.** All existing Neon records key off SHA256(date|amount|cleaned-description). The cleaned description now includes `#NNNN` suffix tags for stripped long digit sequences (e.g., `"DELTA #9836"`). Any future change to `cleanBankDescription` will change hashes and orphan existing Neon claim and processed records — use `handleClearFile` or the Reset button to recover.
 
 - **One expense row per claim.** `UNIQUE(sheet_name, sheet_row_id)` on `reconciliation_claim_links`. Attempting to link the same sheet row to two bank hashes returns 409.
 
@@ -788,7 +834,7 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 
 - **Amount sign convention.** Bank amounts are signed: negative = debit/outgoing, positive = credit/incoming. Sheet expense amounts are always positive. Transfer amounts are positive; directionality comes from `transferFrom`/`transferTo`.
 
-- **CSV merge strategy.** New upload for an account that already has stored rows merges by row content. Newest version wins. Handles re-uploads without duplicating rows.
+- **CSV merge strategy.** New upload for an account that already has stored rows merges using occurrence-indexed keys. Identical rows within the same incoming batch get keys `base`, `base|1`, `base|2`, … so two truly identical lines (same date/amount/description) are both kept and generate separate bank transactions. Re-uploading the same file overwrites the same occurrence slots, so row counts remain stable across re-uploads.
 
 - **`isProcessedWithoutNeonClaim`** — returns true if a bank hash is in `processedHashes` AND not in `bankHashesWithNeonClaim` AND not dismissed. These rows appear in the review section (not matched), flagged as needing re-reconciliation.
 
