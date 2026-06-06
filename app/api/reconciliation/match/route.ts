@@ -3,6 +3,7 @@ import { neon } from "@neondatabase/serverless";
 import {
   findMatches,
   mapBankRowsToTransactions,
+  PROFILE_BY_ACCOUNT,
   type MerchantMemoryEntry,
   type SheetExpenseLike,
   type SheetTransferLike,
@@ -10,20 +11,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const PROFILE_BY_ACCOUNT: Record<string, string> = {
-  "WF Checking": "Wells Fargo",
-  "WF Savings": "Wells Fargo",
-  Fidelity: "Fidelity",
-  "Venmo - Daniel": "Venmo",
-  "Venmo - Katie": "Venmo",
-  Venmo: "Venmo",
-  "Capital One": "Capital One",
-  "America First": "America First",
-  Discover: "Discover",
-  Schwab: "Charles Schwab",
-  Ally: "Ally",
-};
 
 type MatchRequestBody = {
   accountName?: unknown;

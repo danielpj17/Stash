@@ -46,6 +46,25 @@ type ResolvedBankProfile = {
   startRowIndex: number;
 };
 
+/**
+ * Maps a UI account name to the bank profile used to parse its CSV.
+ * Shared by the match route and the CSV identity-dedup helper so both resolve
+ * the same profile (e.g. "WF Checking" -> "Wells Fargo").
+ */
+export const PROFILE_BY_ACCOUNT: Record<string, string> = {
+  "WF Checking": "Wells Fargo",
+  "WF Savings": "Wells Fargo",
+  Fidelity: "Fidelity",
+  "Venmo - Daniel": "Venmo",
+  "Venmo - Katie": "Venmo",
+  Venmo: "Venmo",
+  "Capital One": "Capital One",
+  "America First": "America First",
+  Discover: "Discover",
+  Schwab: "Charles Schwab",
+  Ally: "Ally",
+};
+
 export type BankTransaction = {
   accountName: string;
   date: string;
@@ -563,6 +582,69 @@ export function mapBankRowsToTransactions(
       .map((row) => mapBankRowToTransaction(accountName, row, resolved.profile))
       .filter((tx): tx is BankTransaction => tx !== null),
   );
+}
+
+function fullRowKey(row: string[]): string {
+  return row.map((cell) => String(cell).trim()).join("\t");
+}
+
+/**
+ * Returns one stable dedupe key per input row, aligned to `rows`, identifying a
+ * transaction by its identity (date|amount|description) rather than its full raw
+ * line. This collapses the same transaction re-imported across overlapping
+ * statements (which may differ only in a non-identifying column such as the
+ * running balance), while preserving genuinely-duplicate lines within a single
+ * file.
+ *
+ * - Parseable rows -> `id:${tx.hash}`. The hash is already occurrence-
+ *   disambiguated (X, X-2, ...), so two identical lines in one file get distinct
+ *   keys and are both kept.
+ * - Rows that produce no transaction (header rows, unconfigured banks) -> an
+ *   occurrence-indexed full-row key (`raw:...`), preserving today's behaviour so
+ *   header rows survive for Venmo/Capital One profile resolution.
+ */
+export function computeCsvIdentityKeys(
+  accountName: string,
+  rows: string[][],
+): string[] {
+  const profileAccount = PROFILE_BY_ACCOUNT[accountName] ?? accountName;
+  const transactions = mapBankRowsToTransactions(profileAccount, rows);
+  const keyByRawRef = new Map<string[], string>();
+  for (const tx of transactions) {
+    if (tx.raw) keyByRawRef.set(tx.raw, `id:${tx.hash}`);
+  }
+
+  const fallbackCount = new Map<string, number>();
+  return rows.map((row) => {
+    const idKey = keyByRawRef.get(row);
+    if (idKey) return idKey;
+    const base = fullRowKey(row);
+    const n = fallbackCount.get(base) ?? 0;
+    fallbackCount.set(base, n + 1);
+    return n === 0 ? `raw:${base}` : `raw:${base}|${n}`;
+  });
+}
+
+/**
+ * Identity-merge two batches of CSV rows. Existing rows are kept, incoming rows
+ * with the same identity overwrite them, and new identities are appended — i.e.
+ * the result holds max(existing, incoming) copies of each identity. Returns the
+ * merged rows together with their aligned identity keys.
+ */
+export function mergeCsvRowsByIdentity(
+  accountName: string,
+  existing: string[][],
+  incoming: string[][],
+): { rows: string[][]; keys: string[] } {
+  const existingKeys = computeCsvIdentityKeys(accountName, existing);
+  const incomingKeys = computeCsvIdentityKeys(accountName, incoming);
+  const byKey = new Map<string, string[]>();
+  existing.forEach((row, i) => byKey.set(existingKeys[i], row));
+  incoming.forEach((row, i) => byKey.set(incomingKeys[i], row));
+  return {
+    rows: Array.from(byKey.values()),
+    keys: Array.from(byKey.keys()),
+  };
 }
 
 async function getProcessedTransactionHashes(): Promise<Set<string>> {

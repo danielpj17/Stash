@@ -254,34 +254,6 @@ function mergeWellsFargoBucketIntoChecking(
   return next;
 }
 
-function csvRowDedupeKey(row: string[]): string {
-  return row.map((c) => String(c).trim()).join("\t");
-}
-
-/** Merge multiple CSV uploads per account; same row shape deduped, newest upload wins per key.
- *  Identical rows within the same batch get occurrence-indexed keys (base, base|1, base|2, …)
- *  so that two truly identical CSV lines (same date/amount/description) are both preserved. */
-function mergeCsvRowArrays(existing: string[][] | undefined, incoming: string[][]): string[][] {
-  const byKey = new Map<string, string[]>();
-  const existingCount = new Map<string, number>();
-  for (const row of existing ?? []) {
-    const base = csvRowDedupeKey(row);
-    if (!base) continue;
-    const n = existingCount.get(base) ?? 0;
-    existingCount.set(base, n + 1);
-    byKey.set(n === 0 ? base : `${base}|${n}`, row);
-  }
-  const incomingCount = new Map<string, number>();
-  for (const row of incoming) {
-    const base = csvRowDedupeKey(row);
-    if (!base) continue;
-    const n = incomingCount.get(base) ?? 0;
-    incomingCount.set(base, n + 1);
-    byKey.set(n === 0 ? base : `${base}|${n}`, row);
-  }
-  return Array.from(byKey.values());
-}
-
 /** Merge match arrays by hash; incoming rows replace older versions of same hash. */
 function mergeMatchArrays(existing: MatchResult[] | undefined, incoming: MatchResult[]): MatchResult[] {
   const byHash = new Map<string, MatchResult>();
@@ -1457,9 +1429,49 @@ export default function ReconcilePage() {
   }, [matchesByAccount, tabAccounts]);
 
   const statementReviewRowsByAccount = useMemo(() => {
+    // A re-imported statement that overlaps a prior upload produces a second copy
+    // of a transaction whenever a non-identifying column differs (e.g. the running
+    // balance). The copies share a date/amount/description, so they collapse to the
+    // same base hash but get distinct "-2"/"-3" disambiguation suffixes. The original
+    // copy is claimed/processed (and shows in the matched section); the suffixed copy
+    // is unclaimed and would otherwise reappear here as unmatched — the same bank
+    // transaction showing up in both sections. Strip the suffix to compare identity.
+    const baseHash = (hash: string) => hash.replace(/-\d+$/, "");
     const byAccount: Record<string, MatchResult[]> = {};
     tabAccounts.forEach((account) => {
-      byAccount[account] = statementRowsByAccount[account].filter((match) => {
+      const rows = statementRowsByAccount[account];
+
+      // Count how many times each transaction identity is already represented as a
+      // matched or closed row for this account.
+      const resolvedBaseCount = new Map<string, number>();
+      for (const match of rows) {
+        const id = idForTx(match.bankTransaction);
+        const hash = match.bankTransaction.hash;
+        if (disconnectedIds.has(id)) continue;
+        if (
+          isProcessedWithoutNeonClaim(
+            match,
+            processedHashes,
+            dismissalNotesById,
+            bankHashesWithNeonClaim,
+          )
+        ) {
+          continue;
+        }
+        const isResolved =
+          processedHashes.has(hash) ||
+          (match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match)) ||
+          hasLinkedOrClaimedEntry(match, bankHashesWithNeonClaim);
+        if (!isResolved) continue;
+        const b = baseHash(hash);
+        resolvedBaseCount.set(b, (resolvedBaseCount.get(b) ?? 0) + 1);
+      }
+
+      // Suppress pending rows that duplicate a resolved row, but only up to the
+      // number of resolved copies — so genuine duplicate purchases that both still
+      // need matching are preserved.
+      const consumed = new Map<string, number>();
+      byAccount[account] = rows.filter((match) => {
         const id = idForTx(match.bankTransaction);
         const hash = match.bankTransaction.hash;
         if (disconnectedIds.has(id)) return true;
@@ -1474,7 +1486,16 @@ export default function ReconcilePage() {
           return true;
         }
         if (processedHashes.has(hash)) return false;
-        return isStatementManualReview(match);
+        if (!isStatementManualReview(match)) return false;
+
+        const b = baseHash(hash);
+        const available = resolvedBaseCount.get(b) ?? 0;
+        const used = consumed.get(b) ?? 0;
+        if (used < available) {
+          consumed.set(b, used + 1);
+          return false;
+        }
+        return true;
       });
     });
     return byAccount;
@@ -3858,10 +3879,20 @@ export default function ReconcilePage() {
             ? crypto.randomUUID()
             : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-        const mergedCsv = mergeCsvRowArrays(
-          statementCsvRowsByAccountRef.current[selectedAccount],
-          parsedRows,
-        );
+        // Identity-merge incoming rows with stored rows on the server (which can
+        // hash). The server collapses re-imported transactions onto their existing
+        // copy, persists the merged set, and returns it for matching + the ref.
+        const mergeRes = await fetch("/api/reconciliation/csv-rows", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountName: selectedAccount, rows: parsedRows, merge: true }),
+        });
+        if (!mergeRes.ok) {
+          const err = await mergeRes.json().catch(() => ({ error: mergeRes.statusText }));
+          throw new Error(err.error || `Failed to merge CSV rows (${mergeRes.status})`);
+        }
+        const mergeData = (await mergeRes.json()) as { rows?: string[][] };
+        const mergedCsv = Array.isArray(mergeData.rows) ? mergeData.rows : [];
         statementCsvRowsByAccountRef.current = {
           ...statementCsvRowsByAccountRef.current,
           [selectedAccount]: mergedCsv,
@@ -4009,17 +4040,13 @@ export default function ReconcilePage() {
             [selectedAccount]: mergeMatchArrays(prev[selectedAccount], data.matches),
           }),
         );
-        // Persist CSV rows + match results to Neon (independent so one failure doesn't block the other).
+        // Persist match results to Neon. CSV rows were already stored by the
+        // server-side merge above.
         const neonErrors: string[] = [];
         try {
           await saveMatchCacheToNeon(selectedAccount, data.matches, true);
         } catch (e) {
           neonErrors.push(`match-cache: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        try {
-          await saveCsvRowsToNeon(selectedAccount, mergedCsv);
-        } catch (e) {
-          neonErrors.push(`csv-rows: ${e instanceof Error ? e.message : String(e)}`);
         }
         if (neonErrors.length > 0) {
           setUploadError(`Data is shown but failed to save to cloud: ${neonErrors.join("; ")}`);

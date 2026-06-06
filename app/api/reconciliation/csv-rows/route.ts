@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import { mergeCsvRowsByIdentity } from "@/services/reconciliationService";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
+
+// Insert chunk size — keeps each transaction within the Neon HTTP driver limits.
+const CSV_SAVE_CHUNK_SIZE = 15;
 
 type CsvRowRecord = {
   account_name: string;
@@ -25,6 +29,23 @@ async function ensureCsvRowsTable(sql: any) {
 
 function csvRowDedupeKey(row: string[]): string {
   return row.map((c) => String(c).trim()).join("\t");
+}
+
+function toCells(row: unknown): string[] | null {
+  if (!Array.isArray(row)) return null;
+  return row.map((c: unknown) => (c === null || c === undefined ? "" : String(c)));
+}
+
+async function readStoredRowsForAccount(sql: any, accountName: string): Promise<string[][]> {
+  const rows = (await sql`
+    SELECT cells
+    FROM reconciliation_csv_rows
+    WHERE account_name = ${accountName}
+    ORDER BY created_at ASC
+  `) as Array<{ cells: unknown }>;
+  return rows
+    .map((r) => (Array.isArray(r.cells) ? r.cells.map((c: unknown) => String(c ?? "")) : null))
+    .filter((cells): cells is string[] => cells !== null && cells.length > 0);
 }
 
 export async function GET() {
@@ -69,9 +90,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "DATABASE_URL not configured" }, { status: 503 });
   }
 
-  let body: { accountName?: unknown; rows?: unknown };
+  let body: { accountName?: unknown; rows?: unknown; merge?: unknown };
   try {
-    body = (await request.json()) as { accountName?: unknown; rows?: unknown };
+    body = (await request.json()) as { accountName?: unknown; rows?: unknown; merge?: unknown };
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -84,26 +105,65 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "rows must be an array" }, { status: 400 });
   }
 
-  const validRows: Array<{ key: string; cells: string[] }> = [];
-  const occurrenceCount = new Map<string, number>();
+  const incoming: string[][] = [];
   for (const row of body.rows) {
-    if (!Array.isArray(row)) continue;
-    const cells = row.map((c: unknown) => (c === null || c === undefined ? "" : String(c)));
-    const base = csvRowDedupeKey(cells);
-    if (!base) continue;
-    const n = occurrenceCount.get(base) ?? 0;
-    occurrenceCount.set(base, n + 1);
-    const key = n === 0 ? base : `${base}|${n}`;
-    validRows.push({ key, cells });
-  }
-
-  if (validRows.length === 0) {
-    return NextResponse.json({ success: true, count: 0 });
+    const cells = toCells(row);
+    if (cells && csvRowDedupeKey(cells)) incoming.push(cells);
   }
 
   try {
     const sql = neon(connectionString);
     await ensureCsvRowsTable(sql);
+
+    // --- Merge mode: identity-merge incoming with stored rows, then replace. ---
+    if (body.merge === true) {
+      const existing = await readStoredRowsForAccount(sql, accountName);
+      const merged = mergeCsvRowsByIdentity(accountName, existing, incoming);
+
+      // Replace stored rows for the account. The DELETE rides with the first
+      // insert chunk so an empty/failed write never wipes existing data silently.
+      const inserts = merged.rows.map((cells, i) =>
+        sql`
+          INSERT INTO reconciliation_csv_rows (account_name, dedupe_key, cells)
+          VALUES (${accountName}, ${merged.keys[i]}, ${JSON.stringify(cells)}::jsonb)
+          ON CONFLICT (account_name, dedupe_key)
+          DO UPDATE SET cells = EXCLUDED.cells, created_at = now()
+        `,
+      );
+
+      if (inserts.length === 0) {
+        await sql`DELETE FROM reconciliation_csv_rows WHERE account_name = ${accountName}`;
+        return NextResponse.json({ success: true, rows: [], count: 0 });
+      }
+
+      for (let i = 0; i < inserts.length; i += CSV_SAVE_CHUNK_SIZE) {
+        const chunk = inserts.slice(i, i + CSV_SAVE_CHUNK_SIZE);
+        const isFirst = i === 0;
+        await sql.transaction(
+          isFirst
+            ? [sql`DELETE FROM reconciliation_csv_rows WHERE account_name = ${accountName}`, ...chunk]
+            : chunk,
+        );
+      }
+
+      return NextResponse.json({ success: true, rows: merged.rows, count: merged.rows.length });
+    }
+
+    // --- Legacy append mode: occurrence-indexed full-row keys (kept for the
+    // one-time localStorage migration path). ---
+    const validRows: Array<{ key: string; cells: string[] }> = [];
+    const occurrenceCount = new Map<string, number>();
+    for (const cells of incoming) {
+      const base = csvRowDedupeKey(cells);
+      const n = occurrenceCount.get(base) ?? 0;
+      occurrenceCount.set(base, n + 1);
+      const key = n === 0 ? base : `${base}|${n}`;
+      validRows.push({ key, cells });
+    }
+
+    if (validRows.length === 0) {
+      return NextResponse.json({ success: true, count: 0 });
+    }
 
     await sql.transaction(
       validRows.map((r) =>
