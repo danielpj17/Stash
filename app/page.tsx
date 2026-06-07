@@ -351,10 +351,30 @@ export default function BudgetPage() {
   useEffect(() => {
     let cancelled = false;
     fetch("/api/budget", { cache: "no-store" })
-      .then((res) => res.json())
-      .then(async (data) => {
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
         if (cancelled) return;
-        const isEmpty = !data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length === 0;
+        // A failed GET (e.g. Neon cold-start/hiccup) returns { error } with a non-2xx
+        // status. Never treat that as real budget data: keep allBudgets null so the
+        // page stays in an "unloaded" state and saving is blocked — otherwise the next
+        // save would overwrite the stored budgets with an empty/zeroed object.
+        const loadFailed =
+          !response.ok ||
+          !data ||
+          typeof data !== "object" ||
+          Array.isArray(data) ||
+          "error" in (data as Record<string, unknown>);
+        if (loadFailed) {
+          setAllBudgets(null);
+          const errMsg = (data as { error?: unknown } | null)?.error;
+          setBudgetError(
+            typeof errMsg === "string"
+              ? `Couldn't load saved budgets: ${errMsg}`
+              : "Couldn't load saved budgets. Refresh before editing — saving now would overwrite them."
+          );
+          return;
+        }
+        const isEmpty = Object.keys(data).length === 0;
         if (isEmpty && typeof window !== "undefined") {
           try {
             const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
@@ -395,11 +415,19 @@ export default function BudgetPage() {
             /* ignore migration errors */
           }
         }
-        if (!cancelled && data && typeof data === "object" && !Array.isArray(data))
+        if (!cancelled) {
           setAllBudgets(data as MonthlyBudgets);
-        else if (!cancelled) setAllBudgets({});
+          setBudgetError(null);
+        }
       })
-      .catch(() => { if (!cancelled) setAllBudgets({}); });
+      .catch(() => {
+        if (!cancelled) {
+          setAllBudgets(null);
+          setBudgetError(
+            "Couldn't load saved budgets. Refresh before editing — saving now would overwrite them."
+          );
+        }
+      });
     return () => { cancelled = true; };
   }, [refreshKey]);
 
@@ -552,6 +580,15 @@ export default function BudgetPage() {
 
   const handleSaveBudget = useCallback(async () => {
     if (!selectedCategory || selectedMonth === "full") return;
+    // Saving replaces the ENTIRE budget store in Neon. If budgets haven't finished
+    // loading (null) we don't have the other months/categories in memory, so writing
+    // now would wipe them. Refuse and tell the user to refresh.
+    if (allBudgets === null) {
+      setBudgetError(
+        "Budgets haven't loaded yet. Refresh the page before editing to avoid overwriting your saved budgets."
+      );
+      return;
+    }
     const num = parseFloat(editBudgetValue.replace(/,/g, ""));
     const amount = Number.isNaN(num) ? 0 : num;
     const base = allBudgets ?? {};
@@ -1233,12 +1270,15 @@ export default function BudgetPage() {
                         value={editBudgetValue}
                         onChange={(e) => setEditBudgetValue(e.target.value)}
                         onKeyDown={(e) => { if (e.key === "Enter") handleSaveBudget(); }}
-                        className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none text-sm"
+                        disabled={allBudgets === null}
+                        className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                       />
                       <button
                         type="button"
                         onClick={handleSaveBudget}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-dark transition-colors shrink-0"
+                        disabled={allBudgets === null}
+                        title={allBudgets === null ? "Budgets are still loading — refresh before editing" : undefined}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-dark transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-accent"
                       >
                         <Save className="w-3.5 h-3.5" />
                         Save

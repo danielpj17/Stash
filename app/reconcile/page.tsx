@@ -2183,6 +2183,64 @@ export default function ReconcilePage() {
     [recordMerchantMemory],
   );
 
+  // Auto-approve an exact_match by persisting its claim link (not just the
+  // processed hash). Without the claim link the transaction becomes "processed
+  // but unclaimed" — on the next reload/re-match the matcher short-circuits it to
+  // "processed" and stops suggesting the sheet row, so it resurfaces as
+  // "No candidate match". Mirrors the claim creation in handleApprove.
+  // Returns the claim key (`"Expenses:rowId"`) when a link was created, else null.
+  const persistAutoClaim = useCallback(
+    async (
+      match: MatchResult,
+      meta?: { csvUploadId?: string | null },
+    ): Promise<string | null> => {
+      const tx = match.bankTransaction;
+      const expenseRowId = String(match.matchedSheetExpense?.rowId ?? "").trim();
+
+      // Only expense matches carry a Row ID here. Transfer/restored matches keep
+      // the prior behaviour (mark processed only — they already have claim links).
+      if (!expenseRowId) {
+        await persistProcessedHash(tx, { csvUploadId: meta?.csvUploadId, actor: "auto_match" });
+        return null;
+      }
+
+      const res = await fetch("/api/reconciliation/claims", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bankTransaction: {
+            hash: tx.hash,
+            accountName: tx.accountName,
+            amount: tx.amount,
+            date: tx.date,
+            description: tx.description,
+          },
+          links: [
+            {
+              sheetName: "Expenses",
+              sheetRowId: expenseRowId,
+              amount: Math.abs(tx.amount),
+            },
+          ],
+          actor: "auto_match",
+          csvUploadId: meta?.csvUploadId ?? null,
+        }),
+      });
+      if (!res.ok) {
+        // 409 = sheet row already claimed by another bank hash. Callers already
+        // skip hashes with existing claims, so this is a genuine conflict worth
+        // surfacing rather than silently marking the row resolved.
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `Failed to auto-claim sheet link (${res.status})`);
+      }
+      // The /claims route inserts the processed hash in the same transaction, but
+      // mirror handleApprove (also records merchant memory) for parity.
+      await persistProcessedHash(tx, { csvUploadId: meta?.csvUploadId, actor: "auto_match" });
+      return claimKey("Expenses", expenseRowId);
+    },
+    [persistProcessedHash],
+  );
+
   const handleUserStatementClaimSubmit = useCallback(async (overrideLegs?: 1 | 2) => {
     const { entry, selectedBankRowId } = userStatementClaimModal;
     const transferExpectedLegs = overrideLegs ?? userStatementClaimModal.transferExpectedLegs;
@@ -2482,6 +2540,8 @@ export default function ReconcilePage() {
 
     const nextMatches: Record<string, MatchResult[]> = {};
     const autoApprovalErrors: string[] = [];
+    const autoClaimedHashes: string[] = [];
+    const autoClaimedRowKeys: string[] = [];
 
     for (const accountName of accounts) {
       const rows = statementCsvRowsByAccountRef.current[accountName];
@@ -2506,14 +2566,22 @@ export default function ReconcilePage() {
       nextMatches[accountName] = data.matches;
 
       const autoApprovable = data.matches.filter(
-        (match) => match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match),
+        (match) =>
+          match.matchType === "exact_match" &&
+          hasLinkedUserInputtedEntry(match) &&
+          // Skip rows restored from existing claim links — already claimed.
+          !bankHashSetRematch.has(match.bankTransaction.hash),
       );
       const newAutoHashes: string[] = [];
       await Promise.all(
         autoApprovable.map(async (match) => {
           try {
-            await persistProcessedHash(match.bankTransaction);
+            const claimedKey = await persistAutoClaim(match);
             newAutoHashes.push(match.bankTransaction.hash);
+            if (claimedKey) {
+              autoClaimedHashes.push(match.bankTransaction.hash);
+              autoClaimedRowKeys.push(claimedKey);
+            }
           } catch (err) {
             autoApprovalErrors.push(
               err instanceof Error
@@ -2531,6 +2599,20 @@ export default function ReconcilePage() {
     }
 
     setProcessedHashes(new Set(processedList.map((h) => String(h))));
+    if (autoClaimedHashes.length > 0) {
+      setBankHashesWithNeonClaim((prev) => {
+        const next = new Set(prev);
+        autoClaimedHashes.forEach((hash) => next.add(hash));
+        return next;
+      });
+    }
+    if (autoClaimedRowKeys.length > 0) {
+      setClaimedRowKeys((prev) => {
+        const next = new Set(prev);
+        autoClaimedRowKeys.forEach((key) => next.add(key));
+        return next;
+      });
+    }
     setMatchesByAccount((prev) => mergeWellsFargoBucketIntoChecking({ ...prev, ...nextMatches }));
 
     // Persist updated match results to Neon (replace mode per account).
@@ -2549,7 +2631,7 @@ export default function ReconcilePage() {
     if (autoApprovalErrors.length > 0) {
       setActionError(autoApprovalErrors[0]);
     }
-  }, [persistProcessedHash]);
+  }, [persistAutoClaim]);
 
   const handleApprove = useCallback(
     async (match: MatchResult, userEntry?: UserInputtedEntry) => {
@@ -4096,18 +4178,25 @@ export default function ReconcilePage() {
           );
         }
         const autoApprovable = data.matches.filter(
-          (match) => match.matchType === "exact_match" && hasLinkedUserInputtedEntry(match),
+          (match) =>
+            match.matchType === "exact_match" &&
+            hasLinkedUserInputtedEntry(match) &&
+            // Skip rows restored from existing claim links — already claimed.
+            !bankHashSetUpload.has(match.bankTransaction.hash),
         );
         const autoApprovedHashes: string[] = [];
+        const autoClaimedHashes: string[] = [];
+        const autoClaimedRowKeys: string[] = [];
         const autoApprovalErrors: string[] = [];
         await Promise.all(
           autoApprovable.map(async (match) => {
             try {
-              await persistProcessedHash(match.bankTransaction, {
-                csvUploadId,
-                actor: "auto_match",
-              });
+              const claimedKey = await persistAutoClaim(match, { csvUploadId });
               autoApprovedHashes.push(match.bankTransaction.hash);
+              if (claimedKey) {
+                autoClaimedHashes.push(match.bankTransaction.hash);
+                autoClaimedRowKeys.push(claimedKey);
+              }
             } catch (err) {
               autoApprovalErrors.push(
                 err instanceof Error
@@ -4143,6 +4232,20 @@ export default function ReconcilePage() {
             return next;
           });
         }
+        if (autoClaimedHashes.length > 0) {
+          setBankHashesWithNeonClaim((prev) => {
+            const next = new Set(prev);
+            autoClaimedHashes.forEach((hash) => next.add(hash));
+            return next;
+          });
+        }
+        if (autoClaimedRowKeys.length > 0) {
+          setClaimedRowKeys((prev) => {
+            const next = new Set(prev);
+            autoClaimedRowKeys.forEach((key) => next.add(key));
+            return next;
+          });
+        }
         if (autoApprovalErrors.length > 0) {
           setActionError(autoApprovalErrors[0]);
         }
@@ -4173,7 +4276,7 @@ export default function ReconcilePage() {
         setIsUploading(false);
       }
     },
-    [persistProcessedHash, selectedAccount],
+    [persistAutoClaim, selectedAccount],
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({

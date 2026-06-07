@@ -750,7 +750,7 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 
 - Iterates `statementCsvRowsByAccountRef.current`
 - POST `/match` for each account with current sheet data + processedHashes
-- Auto-approves any new `exact_match` with linked entries
+- Auto-approves any new `exact_match` with linked entries via `persistAutoClaim` (creates the claim link, not just the processed hash); skips rows whose hash already has a claim link
 - POST `/match-cache` to persist updated results
 
 ### `onDrop(files)`
@@ -759,10 +759,10 @@ Used by `rematchAllStoredAccounts()` — survives re-renders without triggering 
 2. Generates `csvUploadId` UUID for audit grouping; sets `statementCsvRowsByAccountRef.current[account] = mergedCsv`
 3. Fetches fresh sheet data + all Neon state (processed hashes, claims, dismissals)
 4. POST `/match` with `mergedCsv` + fresh sheet data
-5. Auto-approves all `exact_match` rows (calls `persistProcessedHash` with `csvUploadId`)
+5. Auto-approves all new `exact_match` rows via `persistAutoClaim` (POST `/claims` to create the claim link **and** mark processed, with `csvUploadId`); skips rows whose hash already has a claim link. **Critical:** auto-match must create a claim link, not just a processed hash — a processed-but-unclaimed hash short-circuits to `matchType: "processed"` on the next match run and resurfaces as "No candidate match".
 6. `setMatchesByAccount` with new results; `setShouldScrollToMatched(true)` triggers scroll to matched section
 7. POST `/match-cache` to Neon (CSV rows were already persisted by the merge in step 1 — no separate `/csv-rows` save)
-8. `setProcessedHashes` updated with auto-approved hashes
+8. `setProcessedHashes`, `setBankHashesWithNeonClaim`, and `setClaimedRowKeys` updated with auto-approved hashes / claimed rows
 9. POST `/uploaded-files` with file name **and `bankHashes`** (all tx hashes from this upload) so the file can later be selectively cleared
 
 ### `handleRematchFromSheet()`
@@ -913,6 +913,8 @@ This was used to recover WF Checking (92 claims + 101 processed, 0 ambiguous map
 - **CSV merge strategy (server-side, identity-based).** New uploads are merged on the server (`POST /csv-rows` `merge` mode) by **transaction identity** (date+amount+description), not by full raw row. Re-importing an overlapping statement collapses the repeated transaction onto its existing copy even when a non-identifying column (e.g. running balance) differs; genuine duplicate lines within one file are still kept (distinct occurrence-disambiguated hashes). The client no longer merges/hashes (the service is not browser-safe). See "Transaction Identity & CSV Dedup". Legacy duplicates already in storage are not auto-collapsed — use **Remove duplicate rows** / `POST /dedupe`.
 
 - **`isProcessedWithoutNeonClaim`** — returns true if a bank hash is in `processedHashes` AND not in `bankHashesWithNeonClaim` AND not dismissed. These rows appear in the review section (not matched), flagged as needing re-reconciliation.
+
+- **Auto-match must create a claim link, not just a processed hash.** `findMatches` short-circuits any hash already in `processed_transactions` to `matchType: "processed"` *before* the amount-scoring step (to prevent rematch loops). So a transaction that is processed-but-unclaimed (orphaned) never gets a suggested/auto match again — it shows in review as "No candidate match", and its sheet expense stays unclaimed. Auto-approval therefore goes through `persistAutoClaim` (POST `/claims` + processed), not bare `persistProcessedHash`. Symptom of the old bug: auto-matched rows looked matched in the upload session (in-memory `exact_match`) but degraded to orphaned "processed / No candidate match" after a reload or re-match because no claim link was ever persisted. Manually-approved rows were unaffected (they always created claims). Repair for legacy orphans: back-fill claim links for the amount-matched row, or clear the stale `processed_transactions` markers so the matcher re-suggests them.
 
 - **Auto-scroll after upload.** `setShouldScrollToMatched(true)` is set in `onDrop` after `setMatchesByAccount`. A `useEffect` watching `shouldScrollToMatched` fires `matchedSectionRef.current?.scrollIntoView()`. This ensures the "Matched to sheet" section is visible even when the review section is empty (all transactions already reconciled).
 
