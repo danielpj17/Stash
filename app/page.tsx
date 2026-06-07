@@ -102,11 +102,22 @@ function buildExpenseTotals(rows: SheetRow[]): { category: string; total: number
   }));
 }
 
+function lerpColor(a: [number, number, number], b: [number, number, number], t: number): string {
+  const r = Math.round(a[0] + (b[0] - a[0]) * t);
+  const g = Math.round(a[1] + (b[1] - a[1]) * t);
+  const bl = Math.round(a[2] + (b[2] - a[2]) * t);
+  return `rgb(${r}, ${g}, ${bl})`;
+}
+
 function getProgressColor(pct: number): string {
-  if (pct >= 100) return "#FF5C5C";
-  if (pct >= 90) return "#ff8000";
-  if (pct >= 70) return "#F9B43B";
-  return "#50C878";
+  const green: [number, number, number] = [80, 200, 120]; // #50C878
+  const yellow: [number, number, number] = [242, 192, 55]; // #F2C037
+  const red: [number, number, number] = [255, 92, 92]; // #FF5C5C
+
+  if (pct <= 50) return lerpColor(green, green, 0); // solid green up to 50%
+  if (pct < 75) return lerpColor(green, yellow, (pct - 50) / 25); // green -> yellow (50%-75%)
+  if (pct < 100) return lerpColor(yellow, red, (pct - 75) / 25); // yellow -> red (75%-100%)
+  return lerpColor(red, red, 0); // full red at/over 100%
 }
 
 function formatDateMMDDYY(timestamp?: string): string {
@@ -697,7 +708,7 @@ export default function BudgetPage() {
                         type="button"
                         key={row.category}
                         onClick={() => openCategory(row.category)}
-                        className={`w-full flex items-center gap-2 text-white px-2 py-[7px] text-left cursor-pointer hover:bg-[#333] transition-colors text-sm ${
+                        className={`relative w-full flex items-center gap-2 text-white px-2 py-[7px] text-left cursor-pointer hover:bg-[#333] transition-colors text-sm ${
                           index % 2 === 0 ? "bg-[#2C2C2C]" : "bg-[#252525]"
                         }`}
                       >
@@ -705,19 +716,18 @@ export default function BudgetPage() {
                         <span className="w-[68px] shrink-0 text-right text-gray-200 tabular-nums text-xs">
                           {fmtDollars(row.total)}
                         </span>
-                        <span className="flex-1 min-w-[60px] mx-1">
-                          <span className="block w-full h-2.5 rounded-full bg-[#1a1a1a] overflow-hidden">
-                            <span
-                              className="block h-full rounded-full transition-all duration-500"
-                              style={{
-                                width: `${barWidth}%`,
-                                backgroundColor: barColor,
-                              }}
-                            />
-                          </span>
-                        </span>
+                        <span className="flex-1 min-w-[60px] mx-1" />
                         <span className="w-[72px] shrink-0 text-right text-gray-400 tabular-nums text-xs">
                           {fmtDollars(budget)}
+                        </span>
+                        <span className="absolute inset-x-2 bottom-1 h-0.5 rounded-full bg-[#1a1a1a] overflow-hidden">
+                          <span
+                            className="block h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${barWidth}%`,
+                              backgroundColor: barColor,
+                            }}
+                          />
                         </span>
                       </button>
                     );

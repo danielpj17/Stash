@@ -620,6 +620,7 @@ export default function ReconcilePage() {
   const [selectedAccount, setSelectedAccount] = useState<AccountOption>("WF Checking");
   const [isUploading, setIsUploading] = useState(false);
   const [removingDuplicates, setRemovingDuplicates] = useState(false);
+  const [rematching, setRematching] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const matchedSectionRef = useRef<HTMLElement | null>(null);
   const [matchesByAccount, setMatchesByAccount] = useState<Record<string, MatchResult[]>>({});
@@ -3089,6 +3090,29 @@ export default function ReconcilePage() {
     [],
   );
 
+  const handleRematchFromSheet = useCallback(async () => {
+    if (typeof window !== "undefined") {
+      const ok = window.confirm(
+        "Re-match all uploaded statements against your current Google Sheet?\n\nThis links bank transactions to expenses you've added since the last upload. Exact matches move to \"Matched\"; the rest become suggested matches you can bulk-approve. Nothing is removed.",
+      );
+      if (!ok) return;
+    }
+    setRematching(true);
+    setActionError("");
+    try {
+      await rematchAllStoredAccounts();
+      if (typeof window !== "undefined") {
+        window.alert(
+          "Re-match complete. Exact matches moved to \"Matched to sheet\". Review the remaining suggested matches and use Bulk Approve to confirm them.",
+        );
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Re-match failed.");
+    } finally {
+      setRematching(false);
+    }
+  }, [rematchAllStoredAccounts]);
+
   const handleDisconnectSheetLink = useCallback(
     async (match: MatchResult) => {
       if (typeof window !== "undefined") {
@@ -4288,18 +4312,30 @@ export default function ReconcilePage() {
               )}
             </div>
             <section className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-hidden">
-              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3">
+              <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark flex items-center justify-between gap-3 flex-wrap">
                 <h2 className="text-white font-semibold">Files</h2>
-                <button
-                  type="button"
-                  title="Remove redundant copies of transactions that are already matched or processed (left behind by re-importing overlapping statements). Your matches are not affected."
-                  onClick={() => void handleRemoveDuplicateRows(selectedAccount)}
-                  disabled={removingDuplicates}
-                  className="flex items-center gap-1.5 rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-2.5 py-1 text-xs text-gray-300 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-50"
-                >
-                  {removingDuplicates && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  Remove duplicate rows
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    title="Re-match all uploaded statements against your current Google Sheet. Links bank lines to expenses you've added since uploading; exact matches move to Matched, the rest become suggested matches you can bulk-approve."
+                    onClick={() => void handleRematchFromSheet()}
+                    disabled={rematching}
+                    className="flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-2.5 py-1 text-xs text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+                  >
+                    {rematching && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    Re-match from sheet
+                  </button>
+                  <button
+                    type="button"
+                    title="Remove redundant copies of transactions that are already matched or processed (left behind by re-importing overlapping statements). Your matches are not affected."
+                    onClick={() => void handleRemoveDuplicateRows(selectedAccount)}
+                    disabled={removingDuplicates}
+                    className="flex items-center gap-1.5 rounded-lg border border-charcoal-dark bg-[#2c2c2c] px-2.5 py-1 text-xs text-gray-300 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-50"
+                  >
+                    {removingDuplicates && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    Remove duplicate rows
+                  </button>
+                </div>
               </div>
               <div className="p-3 text-sm">
                 {selectedAccountUploadedFiles.length === 0 ? (
