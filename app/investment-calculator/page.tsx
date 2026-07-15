@@ -126,6 +126,14 @@ function parseCommas(s: string): number {
   return Number(s.replace(/,/g, "").replace(/[^0-9.-]/g, ""));
 }
 
+function sanitizeDigits(s: string): string {
+  return s.replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+}
+
+function stripLeadingZeros(s: string): string {
+  return s.replace(/^0+(?=\d)/, "");
+}
+
 // ─── Core Calculation ─────────────────────────────────────────────────────────
 
 function calculateProjection(
@@ -344,6 +352,19 @@ function GlobalInputsSection({ globals, globalErrors, onChange }: GlobalInputsSe
     }
   }, [globals.startingPortfolio, portfolioFocused]);
 
+  const [ageDisplay, setAgeDisplay] = useState(String(globals.currentAge));
+  const [ageFocused, setAgeFocused] = useState(false);
+  const [retireDisplay, setRetireDisplay] = useState(String(globals.retirementAge));
+  const [retireFocused, setRetireFocused] = useState(false);
+
+  useEffect(() => {
+    if (!ageFocused) setAgeDisplay(String(globals.currentAge));
+  }, [globals.currentAge, ageFocused]);
+
+  useEffect(() => {
+    if (!retireFocused) setRetireDisplay(String(globals.retirementAge));
+  }, [globals.retirementAge, retireFocused]);
+
   return (
     <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-visible">
       <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl">
@@ -355,11 +376,17 @@ function GlobalInputsSection({ globals, globalErrors, onChange }: GlobalInputsSe
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Current Age</label>
             <input
-              type="number"
-              min={16}
-              max={80}
-              value={globals.currentAge}
-              onChange={(e) => onChange("currentAge", parseInt(e.target.value) || 0)}
+              type="text"
+              inputMode="numeric"
+              value={ageDisplay}
+              onChange={(e) => {
+                const raw = sanitizeDigits(e.target.value);
+                setAgeDisplay(raw);
+                const v = parseInt(raw, 10);
+                if (!isNaN(v)) onChange("currentAge", v);
+              }}
+              onFocus={() => setAgeFocused(true)}
+              onBlur={() => setAgeFocused(false)}
               className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none text-sm"
             />
             {globalErrors.currentAge && (
@@ -371,11 +398,17 @@ function GlobalInputsSection({ globals, globalErrors, onChange }: GlobalInputsSe
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Retirement Age</label>
             <input
-              type="number"
-              min={globals.currentAge + 1}
-              max={100}
-              value={globals.retirementAge}
-              onChange={(e) => onChange("retirementAge", parseInt(e.target.value) || 0)}
+              type="text"
+              inputMode="numeric"
+              value={retireDisplay}
+              onChange={(e) => {
+                const raw = sanitizeDigits(e.target.value);
+                setRetireDisplay(raw);
+                const v = parseInt(raw, 10);
+                if (!isNaN(v)) onChange("retirementAge", v);
+              }}
+              onFocus={() => setRetireFocused(true)}
+              onBlur={() => setRetireFocused(false)}
               className="w-full px-3 py-2 rounded-lg bg-charcoal border border-charcoal-dark text-gray-200 focus:border-accent focus:ring-1 focus:ring-accent outline-none text-sm"
             />
             {globalErrors.retirementAge && (
@@ -394,8 +427,9 @@ function GlobalInputsSection({ globals, globalErrors, onChange }: GlobalInputsSe
                 placeholder="0"
                 value={portfolioDisplay}
                 onChange={(e) => {
-                  setPortfolioDisplay(e.target.value);
-                  const num = parseCommas(e.target.value);
+                  const raw = stripLeadingZeros(e.target.value);
+                  setPortfolioDisplay(raw);
+                  const num = parseCommas(raw);
                   if (isFinite(num) && num >= 0) onChange("startingPortfolio", num);
                 }}
                 onFocus={() => {
@@ -472,6 +506,15 @@ function LifeStageTable({
     return stage.amount === 0 ? "" : stage.amount.toLocaleString("en-US");
   };
 
+  // Per-row display state for end-age inputs
+  const [endAgeDisplays, setEndAgeDisplays] = useState<Record<string, string>>({});
+  const [endAgeFocused, setEndAgeFocused] = useState<Record<string, boolean>>({});
+
+  const getEndAgeDisplay = (stage: LifeStage) => {
+    if (endAgeFocused[stage.id]) return endAgeDisplays[stage.id] ?? String(stage.endAge);
+    return String(stage.endAge);
+  };
+
   return (
     <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-visible">
       <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl flex items-center justify-between">
@@ -520,14 +563,20 @@ function LifeStageTable({
                     {/* End age */}
                     <td className="px-4 py-2.5">
                       <input
-                        type="number"
-                        min={stage.startAge + 1}
-                        max={retirementAge}
-                        value={stage.endAge}
+                        type="text"
+                        inputMode="numeric"
+                        value={getEndAgeDisplay(stage)}
                         onChange={(e) => {
-                          const v = parseInt(e.target.value);
+                          const raw = sanitizeDigits(e.target.value);
+                          setEndAgeDisplays((p) => ({ ...p, [stage.id]: raw }));
+                          const v = parseInt(raw, 10);
                           if (!isNaN(v)) onUpdateEndAge(stage.id, v);
                         }}
+                        onFocus={() => {
+                          setEndAgeFocused((p) => ({ ...p, [stage.id]: true }));
+                          setEndAgeDisplays((p) => ({ ...p, [stage.id]: String(stage.endAge) }));
+                        }}
+                        onBlur={() => setEndAgeFocused((p) => ({ ...p, [stage.id]: false }))}
                         className={`w-16 px-2 py-1.5 rounded-md bg-charcoal border text-gray-200 text-sm focus:ring-1 outline-none text-center ${hasError ? "border-red-500 focus:border-red-400 focus:ring-red-500/30" : "border-charcoal-dark focus:border-accent focus:ring-accent"}`}
                       />
                     </td>
@@ -542,13 +591,17 @@ function LifeStageTable({
                           placeholder="0"
                           value={getAmountDisplay(stage)}
                           onChange={(e) => {
-                            setAmountDisplays((p) => ({ ...p, [stage.id]: e.target.value }));
-                            const num = parseCommas(e.target.value);
+                            const raw = stripLeadingZeros(e.target.value);
+                            setAmountDisplays((p) => ({ ...p, [stage.id]: raw }));
+                            const num = parseCommas(raw);
                             if (isFinite(num) && num >= 0) onUpdateField(stage.id, "amount", num);
                           }}
                           onFocus={() => {
                             setAmountFocused((p) => ({ ...p, [stage.id]: true }));
-                            setAmountDisplays((p) => ({ ...p, [stage.id]: String(stage.amount) }));
+                            setAmountDisplays((p) => ({
+                              ...p,
+                              [stage.id]: stage.amount === 0 ? "" : String(stage.amount),
+                            }));
                           }}
                           onBlur={() => {
                             setAmountFocused((p) => ({ ...p, [stage.id]: false }));
@@ -873,8 +926,8 @@ export default function InvestmentCalculatorPage() {
 
   const globalErrors = useMemo<Partial<Record<keyof GlobalInputs, string>>>(() => {
     const e: Partial<Record<keyof GlobalInputs, string>> = {};
-    if (globals.currentAge < 16 || globals.currentAge > 80)
-      e.currentAge = "Must be between 16 and 80";
+    if (globals.currentAge < 0 || globals.currentAge > 80)
+      e.currentAge = "Must be between 0 and 80";
     if (globals.retirementAge <= globals.currentAge)
       e.retirementAge = "Must be greater than current age";
     return e;

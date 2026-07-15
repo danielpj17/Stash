@@ -3529,7 +3529,13 @@ export default function ReconcilePage() {
       const description = quickAdd.description.trim();
       const expenseType = quickAdd.expenseType;
       const tx = selected.bankTransaction;
-      const bankCents = toCents(Math.abs(tx.amount));
+      const quickAddRowId = quickAdd.rowId;
+
+      // Snapshot the current sheet row ids so we can identify the row we're about to
+      // create by set-difference — robust even when an identical older expense exists.
+      const beforeRowIds = new Set(
+        sheetExpenses.map((r) => (r.rowId ?? "").trim()).filter(Boolean),
+      );
 
       await submitExpense({
         expenseType,
@@ -3538,28 +3544,35 @@ export default function ReconcilePage() {
         date: tx.date,
       });
 
-      // Find the newly-created sheet row so we can create a claim link.
-      // Apps Script does not return the row id, so we re-fetch and pick the
-      // most recent row matching amount + description + expense type.
-      let linkedRowId: string | null = null;
-      try {
-        const freshExpenses = await getExpenses();
-        const match = [...freshExpenses]
-          .reverse()
-          .find((row) => {
-            if (toCents(Math.abs(Number(row.amount ?? 0))) !== toCents(amountNum)) return false;
-            if ((row.expenseType ?? "").trim() !== expenseType) return false;
-            const desc = (row.description ?? "").trim().toLowerCase();
-            return desc === description.toLowerCase();
-          });
-        if (match?.rowId) {
-          linkedRowId = match.rowId.trim();
-          setSheetExpenses(freshExpenses);
+      // Find the newly-created sheet row so we can create a claim link. Apps Script
+      // does not return the row id, so we re-fetch and pick the row whose id is *new*
+      // (falling back to the newest content match). Retry a few times to tolerate
+      // Google Sheets propagation / Row-ID assignment lag.
+      const matchesContent = (row: SheetRow) =>
+        toCents(Math.abs(Number(row.amount ?? 0))) === toCents(amountNum) &&
+        (row.expenseType ?? "").trim() === expenseType &&
+        (row.description ?? "").trim().toLowerCase() === description.toLowerCase();
+      let createdRow: SheetRow | undefined;
+      for (let attempt = 0; attempt < 3 && !createdRow; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 700));
+        try {
+          const freshExpenses = await getExpenses();
+          const candidates = freshExpenses.filter(matchesContent);
+          const found =
+            candidates.find(
+              (row) => (row.rowId ?? "").trim() && !beforeRowIds.has((row.rowId ?? "").trim()),
+            ) ?? [...candidates].reverse().find((row) => (row.rowId ?? "").trim());
+          if (found) {
+            createdRow = found;
+            setSheetExpenses(freshExpenses);
+          }
+        } catch {
+          // Best-effort; retry, then fall through to the re-match recovery below.
         }
-      } catch {
-        // Heuristic re-fetch is best-effort; fall through to processed-only.
       }
 
+      const linkedRowId = (createdRow?.rowId ?? "").trim();
+      let linked = false;
       if (linkedRowId) {
         // Create the claim link, marking processed atomically server-side.
         const claimRes = await fetch("/api/reconciliation/claims", {
@@ -3580,56 +3593,67 @@ export default function ReconcilePage() {
           }),
         });
         if (claimRes.ok) {
+          const updatedMatch: MatchResult = {
+            ...selected,
+            matchType: "exact_match",
+            reason: "Quick logged: created sheet row and linked to bank transaction.",
+            matchedSheetExpense: {
+              amount: amountNum,
+              timestamp: createdRow?.timestamp ?? tx.date,
+              description,
+              expenseType,
+              account: createdRow?.account ?? tx.accountName,
+              rowId: linkedRowId,
+              date: createdRow?.date ?? tx.date,
+            },
+            matchedSheetIndex: undefined,
+            matchedSheetTransfer: undefined,
+            matchedSheetTransferIndex: undefined,
+          };
           setProcessedHashes((prev) => new Set(prev).add(tx.hash));
           setClaimedRowKeys((prev) => {
             const next = new Set(prev);
-            next.add(claimKey("Expenses", linkedRowId as string));
+            next.add(claimKey("Expenses", linkedRowId));
             return next;
           });
           setMatchesByAccount((prev) => {
             const next: Record<string, MatchResult[]> = {};
             for (const [account, rows] of Object.entries(prev)) {
-              next[account] = rows.map((row) => {
-                if (idForTx(row.bankTransaction) !== quickAdd.rowId) return row;
-                return {
-                  ...row,
-                  matchType: "exact_match",
-                  reason: "Quick logged: created sheet row and linked to bank transaction.",
-                  matchedSheetExpense: {
-                    amount: amountNum,
-                    timestamp: tx.date,
-                    description,
-                    expenseType,
-                    account: tx.accountName,
-                    rowId: linkedRowId as string,
-                    date: tx.date,
-                  },
-                  matchedSheetIndex: undefined,
-                  matchedSheetTransfer: undefined,
-                  matchedSheetTransferIndex: undefined,
-                };
-              });
+              next[account] = rows.map((row) =>
+                idForTx(row.bankTransaction) === quickAddRowId ? updatedMatch : row,
+              );
             }
             return next;
           });
+          // Persist the linked match so a reload restores the connected pair — the
+          // match cache is the only source hydrated on reload (no re-match runs),
+          // so an unmatched-origin row without this write degrades to bare "Processed".
+          try {
+            await saveMatchCacheToNeon(tx.accountName, [updatedMatch]);
+          } catch {
+            // Non-fatal: in-memory state + claim link are already set; the row will
+            // be recovered on the next re-match if this cache write failed.
+          }
           // Memory increment: this user-confirmed pattern should auto-claim next time.
           void recordMerchantMemory(tx, expenseType);
           void refreshBankHashesWithNeonClaim();
-        } else {
-          // Sheet row exists, but linking failed. Fall back to processed-only.
-          await persistProcessedHash(tx);
-          setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+          linked = true;
         }
-      } else {
-        // No row id discovered — fall back to processed-only so the bank tx
-        // disappears from review. The user can manually claim later.
-        await persistProcessedHash(tx);
-        setProcessedHashes((prev) => new Set(prev).add(tx.hash));
+      }
+
+      if (!linked) {
+        // We created the sheet expense but couldn't capture its row id / link it.
+        // Recover by re-matching from the sheet: the new expense shares this bank
+        // line's amount and date, so it auto-claims as an exact match (creating the
+        // claim link and persisting the cache). Do NOT mark the hash processed here —
+        // a processed hash short-circuits the matcher and would orphan the row.
+        await rematchAllStoredAccounts();
+        void refreshBankHashesWithNeonClaim();
       }
 
       setDisconnectedIds((prev) => {
         const next = new Set(prev);
-        next.delete(quickAdd.rowId as string);
+        next.delete(quickAddRowId);
         return next;
       });
       closeQuickAdd();
@@ -3643,10 +3667,11 @@ export default function ReconcilePage() {
   }, [
     allMatches,
     closeQuickAdd,
-    persistProcessedHash,
     quickAdd,
     recordMerchantMemory,
     refreshBankHashesWithNeonClaim,
+    rematchAllStoredAccounts,
+    sheetExpenses,
   ]);
 
   const splitTargetAmount = useMemo(() => {
