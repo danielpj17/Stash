@@ -819,7 +819,13 @@ function ProjectionChart({ result, stages, xAxisTicks }: ProjectionChartProps) {
 
 // ─── MetricsCards ─────────────────────────────────────────────────────────────
 
-function MetricsCards({ result }: { result: ProjectionResult | null }) {
+function MetricsCards({
+  result,
+  startingPortfolio,
+}: {
+  result: ProjectionResult | null;
+  startingPortfolio: number;
+}) {
   const r = result;
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -836,8 +842,8 @@ function MetricsCards({ result }: { result: ProjectionResult | null }) {
       />
       <MetricCard
         label="Total Contributed"
-        value={r ? fmtCompact(r.totalContributed) : "—"}
-        sub="your deposits"
+        value={r ? fmtCompact(r.totalContributed + startingPortfolio) : "—"}
+        sub="starting balance + deposits"
       />
       <MetricCard
         label="Growth Earned"
@@ -1028,7 +1034,7 @@ export default function InvestmentCalculatorPage() {
           onUpdateEndAge={updateEndAge}
         />
 
-        <MetricsCards result={result} />
+        <MetricsCards result={result} startingPortfolio={globals.startingPortfolio} />
 
         <div className="rounded-xl bg-[#252525] border border-charcoal-dark overflow-visible">
           <div className="px-4 py-3 bg-[#353535] border-b border-charcoal-dark rounded-t-xl">
